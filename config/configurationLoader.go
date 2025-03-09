@@ -8,7 +8,7 @@ import (
 )
 
 type Configuration struct {
-	Tasks map[string]TaskConfiguration
+	Tasks map[string]*TaskConfiguration
 }
 
 type TaskType string
@@ -33,7 +33,7 @@ type TaskConfiguration struct {
 	ExcludeRegex string `yaml:"exclude"`
 	// Tasks which this task depends on.
 	// Specified tasks should be complete before this task starts.
-	Dependencies []string
+	Dependencies []string `yaml:"dependencies"`
 }
 
 // The tasks id comes from the keys in the YAML file.
@@ -62,10 +62,10 @@ func loadConfigFromYAML(filePath string) (*Configuration, error) {
 		return nil, err
 	}
 
-	return convertYamlStructureToTaskConfigurations(parsedConfiguration), nil
+	return convertYamlStructureToFullyParsedTaskConfigurations(parsedConfiguration), nil
 }
 
-func convertYamlStructureToTaskConfigurations(parsedConfiguration *YamlStructure) Configuration {
+func convertYamlStructureToFullyParsedTaskConfigurations(parsedConfiguration *YamlStructure) Configuration {
 	var taskConfigurations []TaskConfiguration
 	for taskId, taskConfig := range parsedConfiguration.Tasks {
 		taskConfig.Identifier = taskId
@@ -77,7 +77,7 @@ func convertYamlStructureToTaskConfigurations(parsedConfiguration *YamlStructure
 // Validate the task configuration, checking for duplicate identifiers and ensuring required fields are present.
 func validateConfiguration(parsedConfiguration *YamlStructure) error {
 	taskIdMap := make(map[string]bool)
-	for taskId, taskConfig := range *parsedConfiguration {
+	for taskId, taskConfig := range parsedConfiguration.Tasks {
 		if taskId == "" || taskConfig.Run == "" {
 			return fmt.Errorf("invalid task configuration, identifier or run command is missing: %s", taskId)
 		}
@@ -88,5 +88,32 @@ func validateConfiguration(parsedConfiguration *YamlStructure) error {
 
 		taskIdMap[taskId] = true
 	}
+
+	// Check that all task types are either continuous or build
+	for _, taskConfig := range parsedConfiguration.Tasks {
+		if taskConfig.Type == "" {
+			return fmt.Errorf("invalid task configuration, type is missing: %s", taskConfig.Identifier)
+		}
+
+		if taskConfig.Type != Continuous || taskConfig.Type != Build {
+			return fmt.Errorf(
+				"invalid task type: '%s'. Expected the task type to be either '%s' or '%s'",
+				taskConfig.Identifier, Continuous, Build,
+			)
+		}
+	}
+
+	// Check that all dependencies exist in the task configurations
+	for _, taskConfig := range parsedConfiguration.Tasks {
+		for _, dependency := range taskConfig.Dependencies {
+			if _, exists := parsedConfiguration.Tasks[dependency]; !exists {
+				return fmt.Errorf(
+					"invalid task configuration, dependency '%s' does not exist: %s",
+					dependency, taskConfig.Identifier,
+				)
+			}
+		}
+	}
+
 	return nil
 }
