@@ -1,0 +1,22 @@
+tasks:
+  backend:
+    # The task is a long running one, for example an application backend
+    type: continuous
+    run: ./app.exe
+    include: ^/app\.exe$
+    dependencies:
+      - backend-build-task
+  backend-build-task:
+    # This task builds the backend application
+    type: build
+    run: go build -o ./bin/app.exe
+    include: ^/.*\.go$
+    dependencies:
+     - code-gen-run-task
+  code-gen-run-task:
+    # This task runs the database types code generation
+    # NOTE: The script file does not actually exist
+    type: build
+    run: ./scripts/generate_code_sql_types.sh
+    include: ^/schema/.*\.sql$
+  
