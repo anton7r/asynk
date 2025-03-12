@@ -1,3 +1,22 @@
+version: 0.0.1
+
+shared:
+  # NOTE: does not support regex
+  excluded-dirs:
+    - /vendor
+    - /node_modules
+
+  # NOTE: does not support
+  excluded-files:
+    - /main.go
+    - /Dockerfile
+
+  # Controls whether or not changing
+  # this configuration file would
+  # trigger a reload of the running
+  # asynk server
+  reload-on-config-change: true
+
 tasks:
   backend:
     # The task is a long running one, for example an application backend
@@ -6,17 +25,25 @@ tasks:
     include: ^/app\.exe$
     dependencies:
       - backend-build-task
+
   backend-build-task:
     # This task builds the backend application
     type: build
     run: go build -o ./bin/app.exe
     include: ^/.*\.go$
+    # This depends on the code generation task
     dependencies:
      - code-gen-run-task
+
   code-gen-run-task:
     # This task runs the database types code generation
     # NOTE: The script file does not actually exist
     type: build
-    run: ./scripts/generate_code_sql_types.sh
+    # This run commands executes both lines consecutively
+    # With the multiline command support we try to reduce
+    # the need for shell commands.
+    run:
+      - ./scripts/generate_code_sql_types.sh
+      - echo hello
     include: ^/schema/.*\.sql$
   

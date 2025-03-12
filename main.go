@@ -2,35 +2,51 @@ package main
 
 import (
 	"asynk/config"
-	"bufio"
+	"asynk/task/cmdwrap"
+	"context"
 	"fmt"
-	"os"
-	"os/exec"
-	"strings"
+	"os/signal"
 	"sync"
+	"syscall"
 )
+
+type TaskCompletionCallback func(taskId string, errored bool)
 
 type ScheduledTask struct {
 	// Task configuration
-	TaskConfiguration *config.TaskConfiguration
+	TaskConfiguration *config.TaskConfig
 }
 
 type RunningTask struct {
 	// Task configuration
-	TaskConfiguration *config.TaskConfiguration
-	// Executed command
-	cmd *exec.Cmd
+	TaskConfiguration *config.TaskConfig
+	// Cancellable context
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
 type ASYNK struct {
 	// Application configuration
-	Config *config.Configuration
+	Config *config.Config
 	// List of scheduled tasks
-	ScheduledTasks     []*ScheduledTask
+	ScheduledTasks     map[string]*ScheduledTask
 	ScheduledTaskMutex sync.Mutex
 	RunningTasks       []*RunningTask
 	RunningTaskMutex   sync.Mutex
 }
+
+/*
+	Because of the limitations posed by the fsnotify package in Go,
+	we cannot watch for changes in the file system using regex with
+	a very performance oriented way.
+
+	basically this would have to be implemented in a way that adds
+	listeners for directories that have matching file change patterns.
+
+	We could also implement a custom file change detection mechanism,
+	that would utilize sha1 checksums or other hashing techniques.
+
+*/
 
 func main() {
 	fmt.Println("Asynk is starting...")
@@ -44,26 +60,28 @@ func main() {
 	// Create a new application state
 	asynk := &ASYNK{
 		Config:         configuration,
-		ScheduledTasks: make([]*ScheduledTask, 0),
+		ScheduledTasks: make(map[string]*ScheduledTask, 0),
 		RunningTasks:   make([]*RunningTask, 0),
 	}
 
-	// Schedule all tasks and start them concurrently
-	asynk.scheduleAllTasks()
+	fmt.Println("Press Ctrl+C to stop Asynk.")
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 
-	// Start all scheduled tasks concurrently
-	asynk.startScheduledTasks()
+	go func() {
+		// Schedule all tasks and start them concurrently
+		asynk.scheduleAllTasks()
 
-	// Read interrupt signal
-	reader := bufio.NewReader(os.Stdin)
-	fmt.Print("Press Ctrl+C to stop Asynk: ")
-	interruptSignal, _ := reader.ReadString('\n')
+		// Start all scheduled tasks concurrently
+		asynk.startScheduledTasks()
 
-	// Stop all running tasks
+	}()
+
+	<-ctx.Done()
+	fmt.Println("Interrupt signal received. Stopping running tasks...")
 	asynk.stopRunningTasks()
 
-	fmt.Printf("\nAsynk stopped: %s", strings.TrimSpace(interruptSignal))
-
+	fmt.Println("Asynk exited gracefully.")
 }
 
 func (asynk *ASYNK) stopRunningTasks() {
@@ -74,8 +92,9 @@ func (asynk *ASYNK) stopRunningTasks() {
 
 func (asynk *ASYNK) scheduleAllTasks() {
 	for _, taskConfig := range asynk.Config.Tasks {
+		fmt.Printf("Scheduling task: %s\n", taskConfig.Identifier)
 		scheduledTask := &ScheduledTask{TaskConfiguration: taskConfig}
-		asynk.ScheduledTasks = append(asynk.ScheduledTasks, scheduledTask)
+		asynk.ScheduledTasks[scheduledTask.TaskConfiguration.Identifier] = scheduledTask
 	}
 }
 
@@ -90,30 +109,44 @@ func (asynk *ASYNK) onTaskFinished(taskIdentifier string, errored bool) {
 	asynk.RunningTasks = removeRunningTask(asynk.RunningTasks, taskIdentifier)
 	asynk.RunningTaskMutex.Unlock()
 
+	if errored {
+		return
+	}
+
 	// Try to start tasks again if there are any scheduled tasks that can be started
 	asynk.startScheduledTasks()
 }
 
 // Starts the scheduled tasks concurrently if they can be started
-// This will be called from multiple goroutines, so we need to lock the runningTasks and scheduled task slice to prevent data races
+// This will be called from multiple goroutines, so we need to lock the runningTasks
+// and scheduled task slice to prevent data races
 func (asynk *ASYNK) startScheduledTasks() {
 	asynk.ScheduledTaskMutex.Lock()
-	for _, scheduledTask := range asynk.ScheduledTasks {
+	defer asynk.ScheduledTaskMutex.Unlock()
+
+	if len(asynk.ScheduledTasks) == 0 {
+		fmt.Println("[Debug] No scheduled tasks to start.")
+		return
+	}
+
+	fmt.Printf("Starting %d scheduled tasks...\n", len(asynk.ScheduledTasks))
+
+	for taskId, scheduledTask := range asynk.ScheduledTasks {
 		if asynk.canStartTask(scheduledTask) {
+			// Remove from scheduled tasks to prevent duplicate starts
+			delete(asynk.ScheduledTasks, taskId)
+
+			// Start the task in a new goroutine to avoid blocking the main thread
 			task := startTaskAsync(scheduledTask, asynk.onTaskFinished)
 			asynk.onTaskStart(task)
 		}
 	}
-	asynk.ScheduledTaskMutex.Unlock()
+
+	fmt.Printf("Starting tasks completed. %d scheduled tasks remain.\n", len(asynk.ScheduledTasks))
 }
 
 func (asynk *ASYNK) isTaskInQueue(taskIdentifier string) bool {
-	for _, scheduledTask := range asynk.ScheduledTasks {
-		if scheduledTask.TaskConfiguration.Identifier == taskIdentifier {
-			return true
-		}
-	}
-	return false
+	return asynk.ScheduledTasks[taskIdentifier] != nil
 }
 
 func (asynk *ASYNK) isTaskRunning(taskIdentifier string) bool {
@@ -126,8 +159,13 @@ func (asynk *ASYNK) isTaskRunning(taskIdentifier string) bool {
 }
 
 func (asynk *ASYNK) canStartTask(scheduledTask *ScheduledTask) bool {
+	if scheduledTask == nil {
+		fmt.Println("[Debug] Hitting nil scheduled task in canStartTask(), possible bug in code.")
+		return false
+	}
+
 	id := scheduledTask.TaskConfiguration.Identifier
-	if asynk.isTaskInQueue(id) || asynk.isTaskRunning(id) {
+	if asynk.isTaskRunning(id) {
 		return false
 	}
 
@@ -153,90 +191,47 @@ func removeRunningTask(runningTasks []*RunningTask, taskIdentifier string) []*Ru
 
 func startTaskAsync(
 	scheduledTask *ScheduledTask,
-	taskCompletionCallback func(taskIdentifier string, errored bool),
+	taskCompletionCallback TaskCompletionCallback,
 ) *RunningTask {
-	fmt.Printf("Starting task: %s\n", scheduledTask.TaskConfiguration.Identifier)
+	taskId := scheduledTask.TaskConfiguration.Identifier
 
-	// Split the command with its arguments
-	commandParts := strings.Split(scheduledTask.TaskConfiguration.Run, " ")
+	fmt.Printf("Starting task: %s\n", taskId)
 
-	if len(commandParts) < 1 {
-		fmt.Printf("Invalid command to run: %s\n", scheduledTask.TaskConfiguration.Run)
+	if len(scheduledTask.TaskConfiguration.Run) == 0 {
+		fmt.Printf("No command found for task %s\n", taskId)
 		return nil
 	}
 
-	var cmd *exec.Cmd
+	ctx := context.Background()
+	ctx, cancel := context.WithCancel(ctx)
 
-	if len(commandParts) > 1 {
-		cmd = exec.Command(commandParts[0], commandParts[1:]...)
-	} else {
-		cmd = exec.Command(commandParts[0])
+	// This operation could as well be done later on when executing the command
+	cmds := cmdwrap.ParseAllCommands(scheduledTask.TaskConfiguration.Run, taskId)
+
+	runningTask := &RunningTask{
+		TaskConfiguration: scheduledTask.TaskConfiguration,
+		ctx:               ctx,
+		cancel:            cancel,
 	}
 
 	go func() {
-		stdoutPipe, err := cmd.StdoutPipe()
-		if err != nil {
-			fmt.Printf("Error creating stdout pipe for task %s: %v\n", scheduledTask.TaskConfiguration.Identifier, err)
-			return
-		}
-
-		stderrPipe, err := cmd.StderrPipe()
-		if err != nil {
-			fmt.Printf("Error creating stderr pipe for task %s: %v\n", scheduledTask.TaskConfiguration.Identifier, err)
-			return
-		}
-
-		err = cmd.Start()
-		if err != nil {
-			fmt.Printf("Error starting task %s: %v\n", scheduledTask.TaskConfiguration.Identifier, err)
-			return
-		}
-
-		// Create a scanner to read the stdout line by line
-		go func() {
-			scanner := bufio.NewScanner(stdoutPipe)
-			for scanner.Scan() {
-				line := scanner.Text()
-				fmt.Printf("[%s] %s\n", scheduledTask.TaskConfiguration.Identifier, line)
+		for i, cmd := range cmds {
+			err := cmd.Run(ctx)
+			if err != nil {
+				fmt.Printf("Error executing command %d of task %s: %v\n", i+1, taskId, err)
+				taskCompletionCallback(taskId, true)
+				return
 			}
 
-			if err := scanner.Err(); err != nil {
-				fmt.Printf("Error reading stdout for task %s: %v\n", scheduledTask.TaskConfiguration.Identifier, err)
-			}
-		}()
-
-		// Create a scanner to read the stderr line by line
-		go func() {
-			scanner := bufio.NewScanner(stderrPipe)
-			for scanner.Scan() {
-				line := scanner.Text()
-				fmt.Printf("[%s] [ERROR] %s\n", scheduledTask.TaskConfiguration.Identifier, line)
-			}
-
-			if err := scanner.Err(); err != nil {
-				fmt.Printf("Error reading stderr for task %s: %v\n", scheduledTask.TaskConfiguration.Identifier, err)
-			}
-		}()
-
-		err = cmd.Wait()
-		if err != nil {
-			fmt.Printf("Error waiting for task %s to complete: %v\n", scheduledTask.TaskConfiguration.Identifier, err)
-			taskCompletionCallback(scheduledTask.TaskConfiguration.Identifier, true)
-		} else {
-			fmt.Printf("Task %s completed successfully\n", scheduledTask.TaskConfiguration.Identifier)
-			taskCompletionCallback(scheduledTask.TaskConfiguration.Identifier, false)
 		}
 
+		fmt.Printf("Task %s completed successfully\n", taskId)
+		taskCompletionCallback(taskId, false)
 	}()
 
-	return &RunningTask{
-		TaskConfiguration: scheduledTask.TaskConfiguration,
-		cmd:               cmd,
-	}
+	return runningTask
 }
 
 func (runningTask *RunningTask) StopGracefully() {
-	if runningTask.cmd != nil {
-		runningTask.cmd.Cancel()
-	}
+	runningTask.cancel()
 }
