@@ -1,0 +1,24 @@
+version: 0.0.1
+
+shared:
+  # Can only match folders
+  exclude: node_modules
+
+tasks:
+  go-build:
+    type: build
+    run:
+      - go build -o app
+    include: main.go
+  test2:
+    type: build
+    run:
+      - echo Also from second task!
+    include: app
+    dependencies: [test]
+  test:
+    type: build
+    run:
+      - echo Hello
+      - echo World!
+    include: app

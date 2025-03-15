@@ -25,19 +25,19 @@ type TaskConfig struct {
 	// Full command with arguments and options
 	Type TaskType         `yaml:"type"`
 	Run  util.StringArray `yaml:"run"`
-	// Regex pattern to match files to trigger the task
-	IncludeRegex string `yaml:"include"`
-	// Regex pattern to exclude files from triggering the task
-	ExcludeRegex string `yaml:"exclude"`
+	// Glob pattern to match files to trigger the task
+	Include util.GlobArray `yaml:"include"`
+	// Glob pattern to exclude files from triggering the task
+	Exclude util.GlobArray `yaml:"exclude"`
 	// Tasks which this task depends on.
 	// Specified tasks should be complete before this task starts.
-	Dependencies []string `yaml:"dependencies"`
+	Dependencies util.StringArray `yaml:"dependencies"`
 }
 
 type SharedConfig struct {
 	// Shared configuration settings
-	ExcludedDirs         []string `yaml:"excluded-dirs"`
-	ReloadOnConfigChange bool     `yaml:"reload-on-config-change"`
+	Exclude              util.GlobArray `yaml:"exclude"`
+	ReloadOnConfigChange bool           `yaml:"reload-on-config-change"`
 }
 
 // The tasks id comes from the keys in the YAML file.
