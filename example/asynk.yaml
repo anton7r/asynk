@@ -10,7 +10,7 @@ shared:
   exclude: node_modules
 
 tasks:
-  go-build:
+  go:
     type: build
     run:
       - go build -o app

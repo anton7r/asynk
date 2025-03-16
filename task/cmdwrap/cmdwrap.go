@@ -43,7 +43,7 @@ func parseCommand(command string, taskId string, log *zap.Logger) *CommandWrappe
 	}
 }
 
-func (cmdWrap *CommandWrapper) Run(ctx context.Context) error {
+func (cmdWrap *CommandWrapper) Run(ctx context.Context, logWrap *WrapLogger) error {
 	stdoutPipe, stderrPipe, err := cmdWrap.setupPipes()
 	if err != nil {
 		return fmt.Errorf("error setting up pipes for task %s: %v", cmdWrap.taskId, err)
@@ -53,8 +53,8 @@ func (cmdWrap *CommandWrapper) Run(ctx context.Context) error {
 		return fmt.Errorf("error starting task %s: %v", cmdWrap.taskId, err)
 	}
 
-	readOutput(stdoutPipe, cmdWrap.taskId, false, cmdWrap.log)
-	readOutput(stderrPipe, cmdWrap.taskId, true, cmdWrap.log)
+	readOutput(stdoutPipe, cmdWrap.taskId, false, cmdWrap.log, logWrap)
+	readOutput(stderrPipe, cmdWrap.taskId, true, cmdWrap.log, logWrap)
 
 	wait := make(chan error)
 
@@ -104,18 +104,12 @@ func (cmdWrap *CommandWrapper) wait() error {
 	return nil
 }
 
-func readOutput(pipe io.ReadCloser, taskId string, isError bool, log *zap.Logger) {
+func readOutput(pipe io.ReadCloser, taskId string, isError bool, log *zap.Logger, wrapLog *WrapLogger) {
 	go func() {
 		scanner := bufio.NewScanner(pipe)
 		for scanner.Scan() {
 			line := scanner.Text()
-			if isError {
-				// We should not wrap these lines with the logger, as they are not
-				// part of the programs actual output. Instead, we should log them separately.
-				fmt.Printf("[%s] [ERROR] %s\n", taskId, line)
-			} else {
-				fmt.Printf("[%s] %s\n", taskId, line)
-			}
+			wrapLog.log(taskId, line, isError)
 		}
 
 		if err := scanner.Err(); err != nil {

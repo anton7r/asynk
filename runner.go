@@ -33,14 +33,22 @@ type Runner struct {
 	RunningTasks       []*RunningTask
 	RunningTaskMutex   sync.Mutex
 	log                *zap.Logger
+	wrapLogger         *cmdwrap.WrapLogger
 }
 
 func NewRunner(configuration *config.Config, log *zap.Logger) *Runner {
+	taskIds := make([]string, len(configuration.Tasks))
+	for taskId := range configuration.Tasks {
+		taskIds = append(taskIds, taskId)
+	}
+
+	wrapLogger := cmdwrap.NewWrapLogger(taskIds)
 	return &Runner{
 		Config:         configuration,
 		ScheduledTasks: make(map[string]*ScheduledTask, 0),
 		RunningTasks:   make([]*RunningTask, 0),
 		log:            log,
+		wrapLogger:     wrapLogger,
 	}
 }
 
@@ -186,7 +194,7 @@ func (runner *Runner) startTaskAsync(
 
 	go func() {
 		for i, cmd := range cmds {
-			err := cmd.Run(ctx)
+			err := cmd.Run(ctx, runner.wrapLogger)
 			if err != nil {
 				runner.log.Error("Error executing command",
 					zap.String("taskId", taskId),
