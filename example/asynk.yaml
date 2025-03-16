@@ -1,6 +1,11 @@
 version: 0.0.1
 
 shared:
+  # Log level of asynk
+  # Most of the time you should not
+  # need to set this, as this is by default
+  # set to "info".
+  log-level: info
   # Can only match folders
   exclude: node_modules
 

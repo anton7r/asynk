@@ -1,13 +1,13 @@
 package watcher
 
 import (
-	"fmt"
-
 	"github.com/fsnotify/fsnotify"
+	"go.uber.org/zap"
 )
 
 type Watcher struct {
 	watcher *fsnotify.Watcher
+	log     *zap.Logger
 }
 
 /*
@@ -21,7 +21,7 @@ listeners for directories that have matching file change patterns.
 We could also implement a custom file change detection mechanism,
 that would utilize sha1 checksums or other hashing techniques.
 */
-func NewWatcher(watchedDirectories ...string) (*Watcher, error) {
+func NewWatcher(log *zap.Logger, watchedDirectories ...string) (*Watcher, error) {
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		return nil, err
@@ -33,7 +33,7 @@ func NewWatcher(watchedDirectories ...string) (*Watcher, error) {
 			return nil, err
 		}
 	}
-	return &Watcher{watcher: watcher}, nil
+	return &Watcher{watcher: watcher, log: log}, nil
 }
 
 func (w *Watcher) Close() {
@@ -53,7 +53,7 @@ func (w *Watcher) Start(eventHandler func(event fsnotify.Event)) {
 				if !ok {
 					return
 				}
-				fmt.Printf("error watching file system: %v\n", err)
+				w.log.Error("Error watching file system", zap.Error(err))
 			}
 		}
 	}()

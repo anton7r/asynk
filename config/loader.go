@@ -36,8 +36,10 @@ type TaskConfig struct {
 
 type SharedConfig struct {
 	// Shared configuration settings
-	Exclude              util.GlobArray `yaml:"exclude"`
-	ReloadOnConfigChange bool           `yaml:"reload-on-config-change"`
+	Exclude util.GlobArray `yaml:"exclude"`
+	// TODO: this is not yet implemented
+	ReloadOnConfigChange bool   `yaml:"reload-on-config-change"`
+	LogLevel             string `yaml:"log-level"`
 }
 
 // The tasks id comes from the keys in the YAML file.
@@ -56,8 +58,15 @@ func loadConfigFromYAML(filePath string) (*Config, error) {
 		return nil, fmt.Errorf("error reading YAML file: %w", err)
 	}
 
-	var config *Config
-	err = yaml.Unmarshal(data, &config)
+	config := &Config{
+		Shared: SharedConfig{
+			Exclude:  util.NewGlobArray(),
+			LogLevel: "info",
+		},
+		Tasks: make(map[string]*TaskConfig),
+	}
+
+	err = yaml.Unmarshal(data, config)
 	if err != nil {
 		return nil, fmt.Errorf("error unmarshalling YAML data: %w", err)
 	}

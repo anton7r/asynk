@@ -7,6 +7,8 @@ import (
 	"io"
 	"os/exec"
 	"strings"
+
+	"go.uber.org/zap"
 )
 
 type Callback func(errored bool)
@@ -14,15 +16,15 @@ type Callback func(errored bool)
 type CommandWrapper struct {
 	taskId string
 	cmd    *exec.Cmd
+	log    *zap.Logger
 }
 
-func ParseCommand(command string, taskId string) *CommandWrapper {
+func parseCommand(command string, taskId string, log *zap.Logger) *CommandWrapper {
 	// Split the command with its arguments
 	commandParts := strings.Split(command, " ")
 
 	// This should never happen, but just in case it does, log an error and return nil
 	if len(commandParts) < 1 {
-		fmt.Printf("Invalid command to run: %s\n", command)
 		return nil
 	}
 
@@ -37,6 +39,7 @@ func ParseCommand(command string, taskId string) *CommandWrapper {
 	return &CommandWrapper{
 		cmd:    cmd,
 		taskId: taskId,
+		log:    log,
 	}
 }
 
@@ -50,8 +53,8 @@ func (cmdWrap *CommandWrapper) Run(ctx context.Context) error {
 		return fmt.Errorf("error starting task %s: %v", cmdWrap.taskId, err)
 	}
 
-	readOutput(stdoutPipe, cmdWrap.taskId, false)
-	readOutput(stderrPipe, cmdWrap.taskId, true)
+	readOutput(stdoutPipe, cmdWrap.taskId, false, cmdWrap.log)
+	readOutput(stderrPipe, cmdWrap.taskId, true, cmdWrap.log)
 
 	wait := make(chan error)
 
@@ -101,12 +104,14 @@ func (cmdWrap *CommandWrapper) wait() error {
 	return nil
 }
 
-func readOutput(pipe io.ReadCloser, taskId string, isError bool) {
+func readOutput(pipe io.ReadCloser, taskId string, isError bool, log *zap.Logger) {
 	go func() {
 		scanner := bufio.NewScanner(pipe)
 		for scanner.Scan() {
 			line := scanner.Text()
 			if isError {
+				// We should not wrap these lines with the logger, as they are not
+				// part of the programs actual output. Instead, we should log them separately.
 				fmt.Printf("[%s] [ERROR] %s\n", taskId, line)
 			} else {
 				fmt.Printf("[%s] %s\n", taskId, line)
@@ -114,8 +119,8 @@ func readOutput(pipe io.ReadCloser, taskId string, isError bool) {
 		}
 
 		if err := scanner.Err(); err != nil {
-			fmt.Printf("Error reading %s for task %s: %v\n",
-				getPipeType(isError), taskId, err)
+			log.Error("Error reading pipe", zap.String("type", getPipeType(isError)),
+				zap.String("taskId", taskId), zap.Error(err))
 		}
 	}()
 }
@@ -127,17 +132,16 @@ func getPipeType(isError bool) string {
 	return "stdout"
 }
 
-func ParseAllCommands(commands []string, taskId string) []*CommandWrapper {
+func ParseAllCommands(commands []string, taskId string, log *zap.Logger) []*CommandWrapper {
 	cmds := []*CommandWrapper{}
 
 	for i, command := range commands {
-
-		fmt.Printf("[Debug] Parsing command %d: %s\n", i+1, command)
-		cmdWrap := ParseCommand(command, taskId)
+		log.Debug("Parsing command", zap.Int("index", i), zap.String("command", command))
+		cmdWrap := parseCommand(command, taskId, log)
 		if cmdWrap != nil {
 			cmds = append(cmds, cmdWrap)
 		} else {
-			fmt.Printf("Skipping invalid command: %s\n", command)
+			log.Warn("Invalid command to run", zap.Int("index", i), zap.String("command", command))
 		}
 	}
 

@@ -4,8 +4,9 @@ import (
 	"asynk/config"
 	"asynk/task/cmdwrap"
 	"context"
-	"fmt"
 	"sync"
+
+	"go.uber.org/zap"
 )
 
 type TaskCompletionCallback func(taskId string, errored bool)
@@ -31,13 +32,15 @@ type Runner struct {
 	ScheduledTaskMutex sync.Mutex
 	RunningTasks       []*RunningTask
 	RunningTaskMutex   sync.Mutex
+	log                *zap.Logger
 }
 
-func NewRunner(configuration *config.Config) *Runner {
+func NewRunner(configuration *config.Config, log *zap.Logger) *Runner {
 	return &Runner{
 		Config:         configuration,
 		ScheduledTasks: make(map[string]*ScheduledTask, 0),
 		RunningTasks:   make([]*RunningTask, 0),
+		log:            log,
 	}
 }
 
@@ -57,7 +60,7 @@ func (runner *Runner) stopRunningTasks() {
 
 func (runner *Runner) scheduleAllTasks() {
 	for _, taskConfig := range runner.Config.Tasks {
-		fmt.Printf("Scheduling task: %s\n", taskConfig.Identifier)
+		runner.log.Debug("Scheduling task", zap.String("taskId", taskConfig.Identifier))
 		scheduledTask := &ScheduledTask{TaskConfiguration: taskConfig}
 		runner.ScheduledTasks[scheduledTask.TaskConfiguration.Identifier] = scheduledTask
 	}
@@ -90,11 +93,11 @@ func (runner *Runner) startScheduledTasks() {
 	defer runner.ScheduledTaskMutex.Unlock()
 
 	if len(runner.ScheduledTasks) == 0 {
-		fmt.Println("[Debug] No scheduled tasks to start.")
+		runner.log.Debug("No scheduled tasks to start.")
 		return
 	}
 
-	fmt.Printf("Starting %d scheduled tasks...\n", len(runner.ScheduledTasks))
+	runner.log.Debug("Starting scheduled tasks concurrently...", zap.Int("count", len(runner.ScheduledTasks)))
 
 	for taskId, scheduledTask := range runner.ScheduledTasks {
 		if runner.canStartTask(scheduledTask) {
@@ -102,12 +105,12 @@ func (runner *Runner) startScheduledTasks() {
 			delete(runner.ScheduledTasks, taskId)
 
 			// Start the task in a new goroutine to avoid blocking the main thread
-			task := startTaskAsync(scheduledTask, runner.onTaskFinished)
+			task := runner.startTaskAsync(scheduledTask)
 			runner.onTaskStart(task)
 		}
 	}
 
-	fmt.Printf("Starting tasks completed. %d scheduled tasks remain.\n", len(runner.ScheduledTasks))
+	runner.log.Debug("Started scheduled tasks concurrently.", zap.Int("count", len(runner.ScheduledTasks)))
 }
 
 func (runner *Runner) isTaskInQueue(taskIdentifier string) bool {
@@ -125,7 +128,7 @@ func (runner *Runner) isTaskRunning(taskIdentifier string) bool {
 
 func (runner *Runner) canStartTask(scheduledTask *ScheduledTask) bool {
 	if scheduledTask == nil {
-		fmt.Println("[Debug] Hitting nil scheduled task in canStartTask(), possible bug in code.")
+		runner.log.Debug("Hitting nil scheduled task in canStartTask(), possible bug in code.")
 		return false
 	}
 
@@ -158,16 +161,14 @@ func removeRunningTask(runningTasks []*RunningTask, taskIdentifier string) []*Ru
 	return runningTasks
 }
 
-func startTaskAsync(
+func (runner *Runner) startTaskAsync(
 	scheduledTask *ScheduledTask,
-	taskCompletionCallback TaskCompletionCallback,
 ) *RunningTask {
 	taskId := scheduledTask.TaskConfiguration.Identifier
 
-	fmt.Printf("Starting task: %s\n", taskId)
-
+	runner.log.Debug("Starting task", zap.String("taskId", taskId))
 	if len(scheduledTask.TaskConfiguration.Run) == 0 {
-		fmt.Printf("No command found for task %s\n", taskId)
+		runner.log.Debug("No command found for task", zap.String("taskId", taskId))
 		return nil
 	}
 
@@ -175,7 +176,7 @@ func startTaskAsync(
 	ctx, cancel := context.WithCancel(ctx)
 
 	// This operation could as well be done later on when executing the command
-	cmds := cmdwrap.ParseAllCommands(scheduledTask.TaskConfiguration.Run, taskId)
+	cmds := cmdwrap.ParseAllCommands(scheduledTask.TaskConfiguration.Run, taskId, runner.log)
 
 	runningTask := &RunningTask{
 		TaskConfiguration: scheduledTask.TaskConfiguration,
@@ -187,15 +188,20 @@ func startTaskAsync(
 		for i, cmd := range cmds {
 			err := cmd.Run(ctx)
 			if err != nil {
-				fmt.Printf("Error executing command %d of task %s: %v\n", i+1, taskId, err)
-				taskCompletionCallback(taskId, true)
+				runner.log.Error("Error executing command",
+					zap.String("taskId", taskId),
+					zap.Int("commandIndex", i),
+					zap.Error(err),
+				)
+
+				runner.onTaskFinished(taskId, true)
 				return
 			}
 
 		}
 
-		fmt.Printf("Task %s completed successfully\n", taskId)
-		taskCompletionCallback(taskId, false)
+		runner.log.Debug("Task completed successfully", zap.String("taskId", taskId))
+		runner.onTaskFinished(taskId, false)
 	}()
 
 	return runningTask
