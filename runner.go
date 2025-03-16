@@ -3,6 +3,8 @@ package main
 import (
 	"asynk/config"
 	"asynk/task/cmdwrap"
+	"asynk/util"
+	"asynk/watcher"
 	"context"
 	"sync"
 
@@ -34,30 +36,47 @@ type Runner struct {
 	RunningTaskMutex   sync.Mutex
 	log                *zap.Logger
 	wrapLogger         *cmdwrap.WrapLogger
+	watch              *watcher.Watcher
 }
 
 func NewRunner(configuration *config.Config, log *zap.Logger) *Runner {
-	taskIds := make([]string, len(configuration.Tasks))
-	for taskId := range configuration.Tasks {
-		taskIds = append(taskIds, taskId)
-	}
-
-	wrapLogger := cmdwrap.NewWrapLogger(taskIds)
-	return &Runner{
+	runner := &Runner{
 		Config:         configuration,
 		ScheduledTasks: make(map[string]*ScheduledTask, 0),
 		RunningTasks:   make([]*RunningTask, 0),
 		log:            log,
-		wrapLogger:     wrapLogger,
 	}
+
+	taskIds := make([]string, 0, len(configuration.Tasks))
+	for taskId := range configuration.Tasks {
+		taskIds = append(taskIds, taskId)
+	}
+
+	watchableDirectories := watcher.MatchWatchableDirectories(log, configuration.Shared.Exclude, configuration.Tasks)
+	var err error
+	runner.watch, err = watcher.NewWatcher(log, watchableDirectories, runner.onFileChange)
+	if err != nil {
+		log.Error("Error creating watcher", zap.Error(err))
+	}
+
+	runner.wrapLogger = cmdwrap.NewWrapLogger(taskIds)
+	return runner
 }
 
 func (runner *Runner) Start() {
+	runner.watch.Start()
+
 	// Schedule all tasks and start them concurrently
 	runner.scheduleAllTasks()
 
 	// Start all scheduled tasks concurrently
 	runner.startScheduledTasks()
+}
+
+func (runner *Runner) Stop() {
+	runner.watch.Close()
+
+	runner.stopRunningTasks()
 }
 
 func (runner *Runner) stopRunningTasks() {
@@ -66,12 +85,93 @@ func (runner *Runner) stopRunningTasks() {
 	}
 }
 
-func (runner *Runner) scheduleAllTasks() {
-	for _, taskConfig := range runner.Config.Tasks {
+func (runner *Runner) scheduleTasksFromMap(tasks map[string]*config.TaskConfig) {
+	runner.ScheduledTaskMutex.Lock()
+
+	for _, taskConfig := range tasks {
 		runner.log.Debug("Scheduling task", zap.String("taskId", taskConfig.Identifier))
 		scheduledTask := &ScheduledTask{TaskConfiguration: taskConfig}
 		runner.ScheduledTasks[scheduledTask.TaskConfiguration.Identifier] = scheduledTask
+
 	}
+
+	runner.ScheduledTaskMutex.Unlock()
+}
+
+func (runner *Runner) scheduleAllTasks() {
+	runner.scheduleTasksFromMap(runner.Config.Tasks)
+}
+
+// findTasksAffectedByFileChanges identifies which tasks should be scheduled based on file changes
+func (runner *Runner) findTasksAffectedByFileChanges(
+	events map[string]watcher.AggregatedEvent,
+) map[string]*config.TaskConfig {
+	schedulableTasks := make(map[string]*config.TaskConfig, 0)
+
+	for _, event := range events {
+		if len(schedulableTasks) == len(runner.Config.Tasks) {
+			// No more tasks to schedule anymore
+			runner.log.Debug("No more tasks to schedule, propagation stopped")
+			break
+		}
+
+		runner.processEventTasks(event, schedulableTasks)
+	}
+
+	return schedulableTasks
+}
+
+// processEventTasks processes tasks affected by a single event
+func (runner *Runner) processEventTasks(event watcher.AggregatedEvent, schedulableTasks map[string]*config.TaskConfig) {
+	for taskId := range event.Tasks {
+		runner.log.Debug("Checking if task should be scheduled", zap.String("taskId", taskId))
+
+		if _, exists := schedulableTasks[taskId]; exists {
+			runner.log.Debug("Skipping task as it's already scheduled", zap.String("taskId", taskId))
+			continue
+		}
+
+		taskConfig, exists := runner.Config.Tasks[taskId]
+		if !exists {
+			runner.log.Warn("Task not found in configuration", zap.String("taskId", taskId))
+			continue
+		}
+
+		if runner.shouldScheduleTaskForEvent(taskConfig, event.Files) {
+			schedulableTasks[taskId] = taskConfig
+		}
+	}
+}
+
+// shouldScheduleTaskForEvent checks if any of the changed files match the task's include patterns
+func (runner *Runner) shouldScheduleTaskForEvent(taskConfig *config.TaskConfig, files map[string]bool) bool {
+	for file := range files {
+		runner.log.Debug("Checking if should propagate",
+			zap.String("taskId", taskConfig.Identifier),
+			zap.String("file", file),
+		)
+		if taskConfig.Include.AnyMatches(file) {
+			return true
+		}
+	}
+	return false
+}
+
+func (runner *Runner) onFileChange(events map[string]watcher.AggregatedEvent) {
+	runner.log.Info("Handling Propagated file change event")
+
+	// Find tasks affected by file changes
+	schedulableTasks := runner.findTasksAffectedByFileChanges(events)
+
+	runner.log.Info(
+		"Propagated file change event handled, scheduling tasks",
+		zap.Int("count", len(schedulableTasks)),
+		zap.Strings("tasks", util.CollectMapKeys(schedulableTasks)),
+	)
+
+	// Schedule and start the affected tasks
+	runner.scheduleTasksFromMap(schedulableTasks)
+	runner.startScheduledTasks()
 }
 
 func (runner *Runner) onTaskStart(runningTask *RunningTask) {
@@ -112,7 +212,6 @@ func (runner *Runner) startScheduledTasks() {
 			// Remove from scheduled tasks to prevent duplicate starts
 			delete(runner.ScheduledTasks, taskId)
 
-			// Start the task in a new goroutine to avoid blocking the main thread
 			task := runner.startTaskAsync(scheduledTask)
 			runner.onTaskStart(task)
 		}
@@ -192,6 +291,7 @@ func (runner *Runner) startTaskAsync(
 		cancel:            cancel,
 	}
 
+	// Start the task in a new goroutine to avoid blocking the main thread
 	go func() {
 		for i, cmd := range cmds {
 			err := cmd.Run(ctx, runner.wrapLogger)

@@ -1,6 +1,8 @@
 package util
 
 import (
+	"strings"
+
 	"gopkg.in/yaml.v3"
 )
 
@@ -41,4 +43,27 @@ func (g *GlobArray) UnmarshalYAML(value *yaml.Node) error {
 	}
 
 	return nil
+}
+
+func (globs GlobArray) AnyMatches(path string) bool {
+	if len(globs) == 0 {
+		return false
+	}
+
+	for _, glob := range globs {
+		if glob.Match(path) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func (globs GlobArray) String() string {
+	var patterns []string
+	for _, glob := range globs {
+		patterns = append(patterns, glob.String())
+	}
+
+	return "[" + strings.Join(patterns, ", ") + "]"
 }

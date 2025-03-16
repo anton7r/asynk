@@ -2,13 +2,10 @@ package main
 
 import (
 	"asynk/config"
-	"asynk/watcher"
 	"context"
 	"fmt"
 	"os/signal"
 	"syscall"
-
-	"go.uber.org/zap"
 )
 
 func main() {
@@ -28,15 +25,6 @@ func main() {
 	}
 	log := createLogger(logLevel)
 
-	// TODO: pass directoriesToWatch to watcher.NewWatcher()
-	_ = watcher.MatchWatchableDirectories(configuration.Shared.Exclude, configuration.Tasks)
-	w, err := watcher.NewWatcher(log)
-	defer w.Close()
-	if err != nil {
-		log.Error("Error creating watcher", zap.Error(err))
-		return
-	}
-
 	// Create a new application state
 	runner := NewRunner(configuration, log)
 
@@ -48,7 +36,7 @@ func main() {
 
 	<-ctx.Done()
 	log.Info("Interrupt signal received . Stopping all running tasks...")
-	runner.stopRunningTasks()
+	runner.Stop()
 
 	log.Info("Asynk exited gracefully. All running tasks stopped.")
 }

@@ -1,60 +1,172 @@
 package watcher
 
 import (
+	"os"
+	"path/filepath"
+	"sync"
+	"time"
+
 	"github.com/fsnotify/fsnotify"
 	"go.uber.org/zap"
 )
 
 type Watcher struct {
-	watcher *fsnotify.Watcher
-	log     *zap.Logger
+	directories          *WatchableDirectories
+	watcher              *fsnotify.Watcher
+	log                  *zap.Logger
+	aggregator           *FileEventAggregator
+	propagateChangeEvent func(events map[string]AggregatedEvent)
 }
 
-/*
-Because of the limitations posed by the fsnotify package in Go,
-we cannot watch for changes in the file system using regex with
-a very performance oriented way.
+type AggregatedEvent struct {
+	// Relative path to the where the asynk command was run.
+	Dir string
+	// Relative path to the where the asynk command was run.
+	Files map[string]bool
+	// Tasks ids that could be wait for the completion.
+	// We use the wording "could be" because we cannot be
+	// certain that the file which triggered the event actually
+	// matches the tasks glob pattern.
+	Tasks map[string]bool
+}
 
-basically this would have to be implemented in a way that adds
-listeners for directories that have matching file change patterns.
+type FileEventAggregator struct {
+	aggregated     map[string]AggregatedEvent
+	aggregatorLock sync.Mutex
+	changeId       int8
+}
 
-We could also implement a custom file change detection mechanism,
-that would utilize sha1 checksums or other hashing techniques.
-*/
-func NewWatcher(log *zap.Logger, watchedDirectories ...string) (*Watcher, error) {
+func NewWatcher(
+	log *zap.Logger,
+	watchedDirectories *WatchableDirectories,
+	propagateChangeEvent func(events map[string]AggregatedEvent),
+) (*Watcher, error) {
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		return nil, err
 	}
 
-	for _, dir := range watchedDirectories {
-		err = watcher.Add(dir)
-		if err != nil {
-			return nil, err
-		}
+	w := &Watcher{
+		watcher:              watcher,
+		log:                  log,
+		directories:          watchedDirectories,
+		propagateChangeEvent: propagateChangeEvent,
+		aggregator: &FileEventAggregator{
+			aggregated:     make(map[string]AggregatedEvent),
+			aggregatorLock: sync.Mutex{},
+			changeId:       0,
+		},
 	}
-	return &Watcher{watcher: watcher, log: log}, nil
+
+	return w, nil
 }
 
 func (w *Watcher) Close() {
+	w.log.Info("Closing watcher...")
+
 	w.watcher.Close()
 }
 
-func (w *Watcher) Start(eventHandler func(event fsnotify.Event)) {
-	go func() {
-		for {
-			select {
-			case event, ok := <-w.watcher.Events:
-				if !ok {
-					return
-				}
-				eventHandler(event)
-			case err, ok := <-w.watcher.Errors:
-				if !ok {
-					return
-				}
-				w.log.Error("Error watching file system", zap.Error(err))
-			}
+func (w *Watcher) Start() {
+	go w.handleFsEvents()
+	w.watchDirs()
+}
+
+func (w *Watcher) watchDirs() {
+	for _, dir := range w.directories.directories {
+		w.log.Info("Watching directory",
+			zap.String("directory", dir.MatchedDirectory),
+			zap.String("relativePath", dir.RelativePath),
+		)
+
+		err := w.watcher.Add(dir.RelativePath)
+		if err != nil {
+			w.log.Error("Error adding directory to watcher", zap.Error(err))
+			return
 		}
-	}()
+	}
+}
+
+func (w *Watcher) handleFsEvents() {
+	for {
+		select {
+		case event, ok := <-w.watcher.Events:
+			if !ok {
+				return
+			}
+
+			w.log.Info("File changes",
+				zap.String("eventType", event.Op.String()),
+				zap.String("filePath", event.Name),
+			)
+
+			changePath := event.Name
+			stat, err := os.Lstat(changePath)
+			if err != nil {
+				w.log.Error("Error getting file info", zap.Error(err))
+				continue
+			}
+
+			isDir := stat.IsDir()
+			var dirPath string
+			if isDir {
+				dirPath = changePath
+			} else {
+				dirPath = filepath.Dir(changePath)
+			}
+
+			// Check if it is actually a file
+			if !isDir {
+				tasks := w.directories.directories[dirPath].TaskIds
+
+				if len(tasks) > 0 {
+					w.aggregator.aggregatorLock.Lock()
+					event, exists := w.aggregator.aggregated[dirPath]
+					if !exists {
+						event = AggregatedEvent{
+							Dir:   dirPath,
+							Files: make(map[string]bool),
+							Tasks: make(map[string]bool),
+						}
+					}
+
+					event.Files[changePath] = true
+					for taskId := range tasks {
+						event.Tasks[taskId] = true
+					}
+					w.aggregator.aggregated[dirPath] = event
+					delay := time.Millisecond * 200
+					w.aggregator.changeId++
+					w.aggregator.aggregatorLock.Unlock()
+
+					go w.propagateEvents(delay, w.aggregator.changeId)
+				}
+			} else {
+				// TODO: Add new watchers for new directories
+
+			}
+
+		case err, ok := <-w.watcher.Errors:
+			if !ok {
+				return
+			}
+			w.log.Error("Error watching file system", zap.Error(err))
+		}
+	}
+}
+
+// If the changeId matches the current changeId, we propagate the events.
+// TODO: This is a bit of a hack. The propagation should be delayed to avoid spamming the system.
+func (w *Watcher) propagateEvents(delay time.Duration, changeId int8) {
+	time.Sleep(delay)
+	w.aggregator.aggregatorLock.Lock()
+	defer w.aggregator.aggregatorLock.Unlock()
+
+	if w.aggregator.changeId != changeId {
+		w.log.Debug("Cancelling event propagation, because additional changes were detected.")
+		return
+	}
+
+	w.propagateChangeEvent(w.aggregator.aggregated)
+	w.aggregator.aggregated = make(map[string]AggregatedEvent)
 }

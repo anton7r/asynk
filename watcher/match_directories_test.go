@@ -31,7 +31,7 @@ func TestNewWatchableDirectoryMatcher_SkipsGloballyExcludedDirectory(t *testing.
 	taskConfigs := TaskConfigMap{
 		"task1": &config.TaskConfig{
 			Include: util.NewGlobArray("**/*.go"),
-			Exclude: util.GlobArray{},
+			Exclude: util.NewGlobArray(),
 		},
 	}
 
@@ -49,7 +49,7 @@ func TestNewWatchableDirectoryMatcher_DoesNotSkipNonExcludedDirectory(t *testing
 	taskConfigs := TaskConfigMap{
 		"task1": &config.TaskConfig{
 			Include: util.NewGlobArray("**/*.go"),
-			Exclude: util.GlobArray{},
+			Exclude: util.NewGlobArray(),
 		},
 	}
 
@@ -113,8 +113,8 @@ func TestNewWatchableDirectoryMatcher_UpdatesExistingDirectoryTaskIds(t *testing
 	watchable := &WatchableDirectories{
 		directories: map[string]WatchableDirectory{
 			"some/included": {
-				Directory: "some/included",
-				TaskIds:   map[string]bool{"task1": true},
+				MatchedDirectory: "some/included",
+				TaskIds:          map[string]bool{"task1": true},
 			},
 		},
 	}
@@ -122,11 +122,11 @@ func TestNewWatchableDirectoryMatcher_UpdatesExistingDirectoryTaskIds(t *testing
 	taskConfigs := TaskConfigMap{
 		"task1": &config.TaskConfig{
 			Include: util.NewGlobArray("**/*.go"),
-			Exclude: util.GlobArray{},
+			Exclude: util.NewGlobArray(),
 		},
 		"task2": &config.TaskConfig{
 			Include: util.NewGlobArray("**/*.go"),
-			Exclude: util.GlobArray{},
+			Exclude: util.NewGlobArray(),
 		},
 	}
 
@@ -150,11 +150,11 @@ func TestNewWatchableDirectoryMatcher_NoMatchingIncludePatterns(t *testing.T) {
 	taskConfigs := TaskConfigMap{
 		"task1": &config.TaskConfig{
 			Include: util.NewGlobArray("**/*.js"),
-			Exclude: util.GlobArray{},
+			Exclude: util.NewGlobArray(),
 		},
 		"task2": &config.TaskConfig{
 			Include: util.NewGlobArray("**/*.css"),
-			Exclude: util.GlobArray{},
+			Exclude: util.NewGlobArray(),
 		},
 	}
 
