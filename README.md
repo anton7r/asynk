@@ -1,0 +1,93 @@
+# ASYNK - Asynchronous file watcher
+
+## Motivation
+
+Inspired by [Air](https://github.com/air-verse/air) and [reflex](https://github.com/cespare/reflex)
+
+When building a web application with multiple code generation tasks such as open api document generation
+and or database query generation such as [sqlc](https://github.com/sqlc-dev/sqlc), if you want them to
+be generated with a separate file watcher you would have to use reflex to make that feasible.
+
+Air on the other hand does not support running multiple asynchronous tasks, so you would have to
+configure it in such a way that on any file change it would first run code generation and then after
+that it would run the build command even though most of the time you are not actually modifying the
+database migrations or files that generate your database access layer.
+
+Asynk aims to solve this issue by allowing you to configure multiple tasks that can be executed
+asynchronously and you can configure which tasks should be executed after which tasks with asynk's
+dependency array.
+
+## Features
+
+- Asynk's own logs are as bland as possible not to distract you
+- All of the logs from the tasks are propagated to the same console with a unique color for the task id
+- Supports inclusion and exclusion of files with glob patterns.
+- Supports running commands asynchronously by default
+- You can decide which commands block the execution of other commands.
+
+## Road to V1
+
+- Watching new folders created after asynk was started
+- Support env file loading and allow the user of asynk to specify passed env values for tasks.
+- Other things missing?
+
+## Installation
+
+Currently you can install the application via `go install`
+on the command line.
+
+```sh
+go install github.com/anton7r/asynk@latest
+```
+
+## Usage
+
+To get started, first you should create `asynk.yaml` file,
+you can look into the example yaml file for a more complex example.
+
+Here's a simplified `asynk.yaml` configuration:
+```yaml
+# Currently the version does not
+version: 0.0.1
+# Shared contains - values used across the program and is shared by all the tasks
+shared:
+    # Log level is by default set to "info".
+    # It controls how verbose asynk's own logs are.
+    log-level: info
+    # Excludes directories globally for all the configurations
+    # For example if you want to ignore node_modules folder.
+    # Supports glob patterns
+    exclude: node_modules
+
+tasks:
+    app-runner:
+        # The task type can either be build or continuous
+        # Here is it set to continuos to indicate that
+        # the task should be always running
+        type: continuous
+        # Run the application built by the 'go-build' task
+        run: ./bin/app
+        # Watches for the binary changes
+        include: bin/app
+        # indicate that the completion of
+        # go build is a dependency of the
+        # 'app-runner' task.
+        dependencies: [go-build]
+
+    go-build:
+        # The task type can either be build or continuous
+        # Here is it set to to build to indicate
+        # that it should only run once after a file change
+        type: build
+        # Run can be either a single command or a single command
+        run: go build -o ./bin/app
+        # Watches for all go file changes under the project root
+        include: **.go
+
+```
+
+Once you have configured `asynk.yaml`, the next steps would be to run the following command inside of the same folder as `asynk.yaml`:
+
+```sh
+asynk
+```
