@@ -32,14 +32,17 @@ type TaskConfig struct {
 	// Tasks which this task depends on.
 	// Specified tasks should be complete before this task starts.
 	Dependencies util.StringArray `yaml:"dependencies"`
+	// Environment variables to set for the task.
+	Env util.StringArray `yaml:"env"`
 }
 
 type SharedConfig struct {
 	// Shared configuration settings
 	Exclude util.GlobArray `yaml:"exclude"`
 	// TODO: this is not yet implemented
-	ReloadOnConfigChange bool   `yaml:"reload-on-config-change"`
-	LogLevel             string `yaml:"log-level"`
+	ReloadOnConfigChange bool             `yaml:"reload-on-config-change"`
+	LogLevel             string           `yaml:"log-level"`
+	EnvFiles             util.StringArray `yaml:"env-files"`
 }
 
 // The tasks id comes from the keys in the YAML file.

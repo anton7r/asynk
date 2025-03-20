@@ -6,8 +6,11 @@ import (
 	"asynk/util"
 	"asynk/watcher"
 	"context"
+	"regexp"
+	"strings"
 	"sync"
 
+	"github.com/joho/godotenv"
 	"go.uber.org/zap"
 )
 
@@ -37,6 +40,7 @@ type Runner struct {
 	log                *zap.Logger
 	wrapLogger         *cmdwrap.WrapLogger
 	watch              *watcher.Watcher
+	env                map[string]string
 }
 
 func NewRunner(configuration *config.Config, log *zap.Logger) *Runner {
@@ -45,6 +49,7 @@ func NewRunner(configuration *config.Config, log *zap.Logger) *Runner {
 		ScheduledTasks: make(map[string]*ScheduledTask, 0),
 		RunningTasks:   make([]*RunningTask, 0),
 		log:            log,
+		env:            make(map[string]string),
 	}
 
 	taskIds := make([]string, 0, len(configuration.Tasks))
@@ -60,6 +65,12 @@ func NewRunner(configuration *config.Config, log *zap.Logger) *Runner {
 	}
 
 	runner.wrapLogger = cmdwrap.NewWrapLogger(taskIds)
+
+	runner.env, err = godotenv.Read(configuration.Shared.EnvFiles...)
+	if err != nil {
+		log.Error("Error loading environment variables", zap.Error(err))
+	}
+
 	return runner
 }
 
@@ -291,10 +302,12 @@ func (runner *Runner) startTaskAsync(
 		cancel:            cancel,
 	}
 
+	env := interpolateEnvVariablesList(scheduledTask.TaskConfiguration.Env, runner.env)
+
 	// Start the task in a new goroutine to avoid blocking the main thread
 	go func() {
 		for i, cmd := range cmds {
-			err := cmd.Run(ctx, runner.wrapLogger)
+			err := cmd.Run(ctx, env, runner.wrapLogger)
 			if err != nil {
 				runner.log.Error("Error executing command",
 					zap.String("taskId", taskId),
@@ -313,4 +326,20 @@ func (runner *Runner) startTaskAsync(
 	}()
 
 	return runningTask
+}
+
+func interpolateEnvVariablesList(input []string, env map[string]string) []string {
+	result := make([]string, len(input))
+	for i, v := range input {
+		result[i] = interpolateEnvVariables(v, env)
+	}
+	return result
+}
+
+func interpolateEnvVariables(input string, env map[string]string) string {
+	re := regexp.MustCompile(`\${([^}]+)}`)
+	return re.ReplaceAllStringFunc(input, func(match string) string {
+		key := strings.Trim(match[2:len(match)-1], " ")
+		return env[key]
+	})
 }

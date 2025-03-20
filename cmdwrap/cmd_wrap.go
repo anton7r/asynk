@@ -45,7 +45,7 @@ func parseCommand(command string, taskId string, log *zap.Logger) *CommandWrappe
 	}
 }
 
-func (cmdWrap *CommandWrapper) Run(ctx context.Context, logWrap *WrapLogger) error {
+func (cmdWrap *CommandWrapper) Run(ctx context.Context, env []string, logWrap *WrapLogger) error {
 	err := cmdWrap.setupPipes()
 	if err != nil {
 		return fmt.Errorf("error setting up pipes for task %s: %v", cmdWrap.taskId, err)
@@ -53,6 +53,7 @@ func (cmdWrap *CommandWrapper) Run(ctx context.Context, logWrap *WrapLogger) err
 
 	cmdWrap.readOutput(logWrap)
 
+	cmdWrap.cmd.Env = append(cmdWrap.cmd.Env, env...)
 	if err := cmdWrap.start(); err != nil {
 		return fmt.Errorf("error starting task %s: %v", cmdWrap.taskId, err)
 	}
