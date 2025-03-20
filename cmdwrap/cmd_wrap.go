@@ -1,6 +1,7 @@
 package cmdwrap
 
 import (
+	envUtil "asynk/util/env"
 	"bufio"
 	"context"
 	"fmt"
@@ -136,12 +137,14 @@ func (cmdWrap *CommandWrapper) readOutput(wrapLog *WrapLogger) {
 	}()
 }
 
-func ParseAllCommands(commands []string, taskId string, log *zap.Logger) []*CommandWrapper {
+func ParseAllCommands(commands []string, taskId string, log *zap.Logger, env map[string]string) []*CommandWrapper {
 	cmds := []*CommandWrapper{}
 
 	for i, command := range commands {
 		log.Debug("Parsing command", zap.Int("index", i), zap.String("command", command))
-		cmdWrap := parseCommand(command, taskId, log)
+
+		interpolatedCommand := envUtil.InterpolateEnvVariables(command, env)
+		cmdWrap := parseCommand(interpolatedCommand, taskId, log)
 		if cmdWrap != nil {
 			cmds = append(cmds, cmdWrap)
 		} else {

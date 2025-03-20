@@ -4,10 +4,9 @@ import (
 	"asynk/cmdwrap"
 	"asynk/config"
 	"asynk/util"
+	envUtil "asynk/util/env"
 	"asynk/watcher"
 	"context"
-	"regexp"
-	"strings"
 	"sync"
 
 	"github.com/joho/godotenv"
@@ -290,19 +289,19 @@ func (runner *Runner) startTaskAsync(
 		return nil
 	}
 
+	env := envUtil.InterpolateEnvVariablesList(scheduledTask.TaskConfiguration.Env, runner.env)
+
 	ctx := context.Background()
 	ctx, cancel := context.WithCancel(ctx)
 
 	// This operation could as well be done later on when executing the command
-	cmds := cmdwrap.ParseAllCommands(scheduledTask.TaskConfiguration.Run, taskId, runner.log)
+	cmds := cmdwrap.ParseAllCommands(scheduledTask.TaskConfiguration.Run, taskId, runner.log, runner.env)
 
 	runningTask := &RunningTask{
 		TaskConfiguration: scheduledTask.TaskConfiguration,
 		ctx:               ctx,
 		cancel:            cancel,
 	}
-
-	env := interpolateEnvVariablesList(scheduledTask.TaskConfiguration.Env, runner.env)
 
 	// Start the task in a new goroutine to avoid blocking the main thread
 	go func() {
@@ -326,20 +325,4 @@ func (runner *Runner) startTaskAsync(
 	}()
 
 	return runningTask
-}
-
-func interpolateEnvVariablesList(input []string, env map[string]string) []string {
-	result := make([]string, len(input))
-	for i, v := range input {
-		result[i] = interpolateEnvVariables(v, env)
-	}
-	return result
-}
-
-func interpolateEnvVariables(input string, env map[string]string) string {
-	re := regexp.MustCompile(`\${([^}]+)}`)
-	return re.ReplaceAllStringFunc(input, func(match string) string {
-		key := strings.Trim(match[2:len(match)-1], " ")
-		return env[key]
-	})
 }
