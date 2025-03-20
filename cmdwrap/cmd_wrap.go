@@ -112,7 +112,11 @@ func (cmdWrap *CommandWrapper) wait() error {
 	}
 
 	if err != nil {
-		return fmt.Errorf("error occured when waiting for task '%s' to complete: %v", cmdWrap.taskId, err)
+		if _, ok := err.(*exec.ExitError); ok {
+			// If it's an ExitError, we'll omit the "exit status 1" message
+			return fmt.Errorf("task '%s' failed to complete successfully", cmdWrap.taskId)
+		}
+		return fmt.Errorf("error occurred when waiting for task '%s' to complete: %v", cmdWrap.taskId, err)
 	}
 	return nil
 }
