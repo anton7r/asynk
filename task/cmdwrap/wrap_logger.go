@@ -27,15 +27,11 @@ func NewWrapLogger(taskIds []string) *WrapLogger {
 	return logger
 }
 
-func (logger *WrapLogger) log(taskId string, message string, errored bool) {
+func (logger *WrapLogger) log(taskId string, message string) {
 	taskColor, ok := logger.taskColors[taskId]
 	if !ok {
 		logger.taskColors[taskId] = color.RGB(generateRgbColor(taskId))
 		taskColor = logger.taskColors[taskId]
-	}
-
-	if errored {
-		message = color.RedString("Error:") + " " + message
 	}
 
 	fmt.Println(taskColor.Sprintf("%s%s |", taskId, repeatString(" ", logger.maxTaskIdLength-len(taskId))), message)
