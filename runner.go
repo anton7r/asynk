@@ -1,8 +1,8 @@
 package main
 
 import (
+	"asynk/cmdwrap"
 	"asynk/config"
-	"asynk/task/cmdwrap"
 	"asynk/util"
 	"asynk/watcher"
 	"context"
