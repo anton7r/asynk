@@ -131,13 +131,6 @@ func (cmdWrap *CommandWrapper) readOutput(wrapLog *WrapLogger) {
 	}()
 }
 
-func getPipeType(isError bool) string {
-	if isError {
-		return "stderr"
-	}
-	return "stdout"
-}
-
 func ParseAllCommands(commands []string, taskId string, log *zap.Logger) []*CommandWrapper {
 	cmds := []*CommandWrapper{}
 
