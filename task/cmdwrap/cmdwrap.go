@@ -49,12 +49,12 @@ func (cmdWrap *CommandWrapper) Run(ctx context.Context, logWrap *WrapLogger) err
 		return fmt.Errorf("error setting up pipes for task %s: %v", cmdWrap.taskId, err)
 	}
 
+	readOutput(stdoutPipe, cmdWrap.taskId, false, cmdWrap.log, logWrap)
+	readOutput(stderrPipe, cmdWrap.taskId, true, cmdWrap.log, logWrap)
+
 	if err := cmdWrap.start(); err != nil {
 		return fmt.Errorf("error starting task %s: %v", cmdWrap.taskId, err)
 	}
-
-	readOutput(stdoutPipe, cmdWrap.taskId, false, cmdWrap.log, logWrap)
-	readOutput(stderrPipe, cmdWrap.taskId, true, cmdWrap.log, logWrap)
 
 	wait := make(chan error)
 
