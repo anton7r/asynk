@@ -23,8 +23,11 @@ const (
 type TaskConfig struct {
 	Identifier string
 	// Full command with arguments and options
-	Type TaskType         `yaml:"type"`
-	Run  util.StringArray `yaml:"run"`
+	Type       TaskType         `yaml:"type"`
+	Run        util.StringArray `yaml:"run"`
+	RunWindows util.StringArray `yaml:"run-windows"`
+	RunLinux   util.StringArray `yaml:"run-linux"`
+	RunMac     util.StringArray `yaml:"run-mac"`
 	// Glob pattern to match files to trigger the task
 	Include util.GlobArray `yaml:"include"`
 	// Glob pattern to exclude files from triggering the task
@@ -89,3 +92,5 @@ func fillTaskIds(config *Config) {
 		taskConfig.Identifier = taskId
 	}
 }
+
+// persistent hashes could be a useful feature for large projects.

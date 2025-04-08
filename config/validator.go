@@ -31,8 +31,18 @@ func (v *validator) validateTaskId() error {
 
 func (v *validator) validateRunCommand() error {
 	for taskId, taskConfig := range v.config.Tasks {
-		if taskConfig.Run[0] == "" {
+		if taskConfig.Run[0] == "" &&
+			(taskConfig.RunWindows[0] == "" ||
+				taskConfig.RunLinux[0] == "" ||
+				taskConfig.RunMac[0] == "") {
 			return fmt.Errorf("invalid task configuration, run command is missing: %s", taskId)
+		}
+
+		if taskConfig.Run[0] != "" &&
+			(taskConfig.RunWindows[0] != "" ||
+				taskConfig.RunLinux[0] != "" ||
+				taskConfig.RunMac[0] != "") {
+			return fmt.Errorf("invalid task configuration, run command is duplicated, you have defined the global run command and the platform specific run commands: %s", taskId)
 		}
 	}
 	return nil

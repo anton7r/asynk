@@ -7,6 +7,7 @@ import (
 	envUtil "asynk/util/env"
 	"asynk/watcher"
 	"context"
+	"runtime"
 	"sync"
 
 	"github.com/joho/godotenv"
@@ -294,8 +295,24 @@ func (runner *Runner) startTaskAsync(
 	ctx := context.Background()
 	ctx, cancel := context.WithCancel(ctx)
 
+	var run []string
+	if len(scheduledTask.TaskConfiguration.Run) > 0 {
+		run = scheduledTask.TaskConfiguration.Run
+	} else {
+		if runtime.GOOS == "windows" {
+			run = scheduledTask.TaskConfiguration.RunWindows
+		} else if runtime.GOOS == "linux" {
+			run = scheduledTask.TaskConfiguration.RunLinux
+		} else if runtime.GOOS == "darwin" {
+			run = scheduledTask.TaskConfiguration.RunMac
+		} else {
+			runner.log.Error("Unsupported OS", zap.String("os", runtime.GOOS))
+			return nil
+		}
+	}
+
 	// This operation could as well be done later on when executing the command
-	cmds := cmdwrap.ParseAllCommands(scheduledTask.TaskConfiguration.Run, taskId, runner.log, runner.env)
+	cmds := cmdwrap.ParseAllCommands(run, taskId, runner.log, runner.env)
 
 	runningTask := &RunningTask{
 		TaskConfiguration: scheduledTask.TaskConfiguration,
