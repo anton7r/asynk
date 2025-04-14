@@ -155,7 +155,7 @@ func (w *Watcher) checkIfWeNeedToNotify(changePath string, dirPath string) {
 	directories, ok := w.directories.directories[dirPath]
 
 	if !ok {
-		w.log.Error("Directory not found in watchable directories",
+		w.log.Debug("Directory not found in watchable directories",
 			zap.String("directory", dirPath))
 		return
 	}
