@@ -75,7 +75,12 @@ func (cmdWrap *CommandWrapper) Run(ctx context.Context, env []string, logWrap *W
 }
 
 func (cmdWrap *CommandWrapper) Cancel() error {
-	return cmdWrap.cmd.Cancel()
+	if cmdWrap.cmd == nil || cmdWrap.cmd.Process == nil {
+		return nil
+	}
+
+	// Kill the process and its subprocesses
+	return cmdWrap.cmd.Process.Kill()
 }
 
 func (cmdWrap *CommandWrapper) setupPipes() error {
