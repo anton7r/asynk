@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"go.uber.org/zap"
 )
 
 func TestNewWatchableDirectoryMatcher_ReturnsErrorOnInputError(t *testing.T) {
@@ -17,7 +18,8 @@ func TestNewWatchableDirectoryMatcher_ReturnsErrorOnInputError(t *testing.T) {
 	globallyExcluded := util.GlobArray{}
 	taskConfigs := TaskConfigMap{}
 
-	matcher := newWatchableDirectoryMatcher(watchable, globallyExcluded, taskConfigs)
+	logger := zap.NewNop()
+	matcher := newWatchableDirectoryMatcher(watchable, globallyExcluded, taskConfigs, logger)
 
 	expectedErr := fmt.Errorf("input error")
 	err := matcher("some/path", nil, expectedErr)
@@ -35,7 +37,8 @@ func TestNewWatchableDirectoryMatcher_SkipsGloballyExcludedDirectory(t *testing.
 		},
 	}
 
-	matcher := newWatchableDirectoryMatcher(watchable, globallyExcluded, taskConfigs)
+	logger := zap.NewNop()
+	matcher := newWatchableDirectoryMatcher(watchable, globallyExcluded, taskConfigs, logger)
 
 	info := &mockFileInfo{isDir: true}
 	err := matcher("some/excluded/path", info, nil)
@@ -53,7 +56,8 @@ func TestNewWatchableDirectoryMatcher_DoesNotSkipNonExcludedDirectory(t *testing
 		},
 	}
 
-	matcher := newWatchableDirectoryMatcher(watchable, globallyExcluded, taskConfigs)
+	logger := zap.NewNop()
+	matcher := newWatchableDirectoryMatcher(watchable, globallyExcluded, taskConfigs, logger)
 
 	info := &mockFileInfo{isDir: false}
 	err := matcher("some/included/path.go", info, nil)
@@ -78,7 +82,8 @@ func TestNewWatchableDirectoryMatcher_AddsDirectoryWithMatchingTask(t *testing.T
 		},
 	}
 
-	matcher := newWatchableDirectoryMatcher(watchable, globallyExcluded, taskConfigs)
+	logger := zap.NewNop()
+	matcher := newWatchableDirectoryMatcher(watchable, globallyExcluded, taskConfigs, logger)
 
 	info := &mockFileInfo{isDir: false}
 	err := matcher("some/included/path.go", info, nil)
@@ -89,6 +94,30 @@ func TestNewWatchableDirectoryMatcher_AddsDirectoryWithMatchingTask(t *testing.T
 	assert.Contains(t, watchable.directories["some/included"].TaskIds, "task1",
 		"Expected task 'task1' to be associated with 'some/included' directory")
 }
+
+func TestNewWatchableDirectoryMatcher_AddsDirectoryWithMatchingTask_Windows(t *testing.T) {
+	watchable := &WatchableDirectories{directories: make(map[string]WatchableDirectory)}
+	globallyExcluded := util.GlobArray{}
+	taskConfigs := TaskConfigMap{
+		"task1": &config.TaskConfig{
+			Include: util.NewGlobArray("**/*.go"),
+			Exclude: util.NewGlobArray("**/excluded/**"),
+		},
+	}
+
+	logger := zap.NewNop()
+	matcher := newWatchableDirectoryMatcher(watchable, globallyExcluded, taskConfigs, logger)
+
+	info := &mockFileInfo{isDir: false}
+	err := matcher("some\\included\\path.go", info, nil)
+
+	assert.NoError(t, err, "Expected no error")
+	assert.Contains(t, watchable.directories, "some/included",
+		"Expected directory 'some/included' to be added to watchable directories")
+	assert.Contains(t, watchable.directories["some/included"].TaskIds, "task1",
+		"Expected task 'task1' to be associated with 'some/included' directory")
+}
+
 func TestNewWatchableDirectoryMatcher_ExcludeOnlyTasks(t *testing.T) {
 	watchable := &WatchableDirectories{directories: make(map[string]WatchableDirectory)}
 	globallyExcluded := util.GlobArray{}
@@ -99,7 +128,8 @@ func TestNewWatchableDirectoryMatcher_ExcludeOnlyTasks(t *testing.T) {
 		},
 	}
 
-	matcher := newWatchableDirectoryMatcher(watchable, globallyExcluded, taskConfigs)
+	logger := zap.NewNop()
+	matcher := newWatchableDirectoryMatcher(watchable, globallyExcluded, taskConfigs, logger)
 
 	info := &mockFileInfo{isDir: false}
 	err := matcher("some/excluded/path.go", info, nil)
@@ -130,7 +160,8 @@ func TestNewWatchableDirectoryMatcher_UpdatesExistingDirectoryTaskIds(t *testing
 		},
 	}
 
-	matcher := newWatchableDirectoryMatcher(watchable, globallyExcluded, taskConfigs)
+	logger := zap.NewNop()
+	matcher := newWatchableDirectoryMatcher(watchable, globallyExcluded, taskConfigs, logger)
 
 	info := &mockFileInfo{isDir: false}
 	err := matcher("some/included/path.go", info, nil)
@@ -158,12 +189,14 @@ func TestNewWatchableDirectoryMatcher_NoMatchingIncludePatterns(t *testing.T) {
 		},
 	}
 
-	matcher := newWatchableDirectoryMatcher(watchable, globallyExcluded, taskConfigs)
+	logger := zap.NewNop()
+	matcher := newWatchableDirectoryMatcher(watchable, globallyExcluded, taskConfigs, logger)
 
 	info := &mockFileInfo{isDir: false}
 	err := matcher("some/path/file.txt", info, nil)
 
 	assert.NoError(t, err, "Expected no error")
+	assert.Empty(t, watchable.directories)
 	assert.NotContains(t, watchable.directories, "some/path",
 		"Expected directory 'some/path' not to be added to watchable directories")
 }
@@ -178,7 +211,8 @@ func BenchmarkNewWatchableDirectoryMatcher(b *testing.B) {
 		},
 	}
 
-	matcher := newWatchableDirectoryMatcher(watchable, globallyExcluded, taskConfigs)
+	logger := zap.NewNop()
+	matcher := newWatchableDirectoryMatcher(watchable, globallyExcluded, taskConfigs, logger)
 
 	b.ResetTimer()
 

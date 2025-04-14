@@ -168,7 +168,8 @@ func (runner *Runner) shouldScheduleTaskForEvent(taskConfig *config.TaskConfig, 
 }
 
 func (runner *Runner) onFileChange(events map[string]watcher.AggregatedEvent) {
-	runner.log.Info("Handling Propagated file change event")
+	// Maybe unnecessary
+	//runner.log.Info("Handling Propagated file change event")
 
 	// Find tasks affected by file changes
 	schedulableTasks := runner.findTasksAffectedByFileChanges(events)

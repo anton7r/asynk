@@ -2,7 +2,9 @@ package watcher
 
 import (
 	"os"
+	"path"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -68,8 +70,8 @@ func (w *Watcher) Close() {
 }
 
 func (w *Watcher) Start() {
-	go w.handleFsEvents()
 	w.watchDirs()
+	go w.handleFsEvents()
 }
 
 func (w *Watcher) watchDirs() {
@@ -101,46 +103,35 @@ func (w *Watcher) handleFsEvents() {
 			)
 
 			changePath := event.Name
-			stat, err := os.Lstat(changePath)
-			if err != nil {
-				w.log.Error("Error getting file info", zap.Error(err))
-				continue
-			}
 
-			isDir := stat.IsDir()
 			var dirPath string
-			if isDir {
-				dirPath = changePath
+			var isDir bool
+			//var isRemove bool
+
+			if event.Op&fsnotify.Remove == fsnotify.Remove {
+				//isRemove = true
+				// We can only do best approximation here, since the file is now deleted
+				// or we could perhaps cache it in memory.
+				isDir = !strings.Contains(path.Base(changePath), ".")
+
 			} else {
-				dirPath = filepath.Dir(changePath)
+				stat, err := os.Lstat(changePath)
+				if err != nil {
+					w.log.Error("Error getting file info", zap.Error(err))
+					continue
+				}
+
+				isDir = stat.IsDir()
+				if isDir {
+					dirPath = changePath
+				} else {
+					dirPath = filepath.Dir(changePath)
+				}
 			}
 
 			// Check if it is actually a file
 			if !isDir {
-				tasks := w.directories.directories[dirPath].TaskIds
-
-				if len(tasks) > 0 {
-					w.aggregator.aggregatorLock.Lock()
-					event, exists := w.aggregator.aggregated[dirPath]
-					if !exists {
-						event = AggregatedEvent{
-							Dir:   dirPath,
-							Files: make(map[string]bool),
-							Tasks: make(map[string]bool),
-						}
-					}
-
-					event.Files[changePath] = true
-					for taskId := range tasks {
-						event.Tasks[taskId] = true
-					}
-					w.aggregator.aggregated[dirPath] = event
-					delay := time.Millisecond * 200
-					w.aggregator.changeId++
-					w.aggregator.aggregatorLock.Unlock()
-
-					go w.propagateEvents(delay, w.aggregator.changeId)
-				}
+				w.checkIfWeNeedToNotify(changePath, dirPath)
 			} else {
 				// TODO: Add new watchers for new directories
 
@@ -152,6 +143,41 @@ func (w *Watcher) handleFsEvents() {
 			}
 			w.log.Error("Error watching file system", zap.Error(err))
 		}
+	}
+}
+
+func (w *Watcher) checkIfWeNeedToNotify(changePath string, dirPath string) {
+	directories, ok := w.directories.directories[dirPath]
+
+	if !ok {
+		w.log.Error("Directory not found in watchable directories",
+			zap.String("directory", dirPath))
+		return
+	}
+
+	tasks := directories.TaskIds
+
+	if len(tasks) > 0 {
+		w.aggregator.aggregatorLock.Lock()
+		event, exists := w.aggregator.aggregated[dirPath]
+		if !exists {
+			event = AggregatedEvent{
+				Dir:   dirPath,
+				Files: make(map[string]bool),
+				Tasks: make(map[string]bool),
+			}
+		}
+
+		event.Files[changePath] = true
+		for taskId := range tasks {
+			event.Tasks[taskId] = true
+		}
+		w.aggregator.aggregated[dirPath] = event
+		delay := time.Millisecond * 200
+		w.aggregator.changeId++
+		w.aggregator.aggregatorLock.Unlock()
+
+		go w.propagateEvents(delay, w.aggregator.changeId)
 	}
 }
 

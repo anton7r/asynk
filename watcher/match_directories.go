@@ -23,12 +23,17 @@ type WatchableDirectories struct {
 type TaskConfigMap = map[string]*config.TaskConfig
 
 func newWatchableDirectoryMatcher(
-	watchable *WatchableDirectories, globallyExcluded util.GlobArray, taskConfigs TaskConfigMap,
+	watchable *WatchableDirectories,
+	globallyExcluded util.GlobArray,
+	taskConfigs TaskConfigMap,
+	logger *zap.Logger,
 ) func(pathStr string, info os.FileInfo, err error) error {
 	return func(pathStr string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
+
+		pathStr = filepath.ToSlash(pathStr)
 
 		// Skip directories that are globally excluded
 		isDir := info.IsDir()
@@ -44,7 +49,15 @@ func newWatchableDirectoryMatcher(
 
 		// If we have matching tasks, update the watchable directories
 		if len(matchedTasks) > 0 {
+			logger.Debug("Path not matched",
+				zap.String("path", pathStr),
+				zap.String("dirPath", dirPath))
+
 			updateWatchableDirectory(watchable, dirPath, matchedTasks)
+		} else {
+			logger.Debug("Path matched",
+				zap.String("path", pathStr),
+				zap.String("dirPath", dirPath))
 		}
 
 		return nil
@@ -56,8 +69,10 @@ func getDirPath(pathStr string, isDir bool) string {
 	if isDir {
 		return pathStr
 	}
+
 	// Use path.Dir for OS-agnostic directory paths
 	return path.Dir(pathStr)
+	//return filepath.Dir(pathStr)
 }
 
 // Helper function to find tasks that should watch this path
@@ -119,9 +134,9 @@ func MatchWatchableDirectories(
 	watchable := &WatchableDirectories{directories: make(map[string]WatchableDirectory)}
 
 	// List all items in the directory - assume current directory
-	filepath.Walk("./", newWatchableDirectoryMatcher(watchable, globallyExcluded, taskConfigs))
+	filepath.Walk("./", newWatchableDirectoryMatcher(watchable, globallyExcluded, taskConfigs, log))
 
-	log.Debug("Matched watchable directories",
+	log.Info("Matched watchable directories",
 		zap.Int("matched_directories", len(watchable.directories)),
 		zap.Dict("watchable", map2fields(watchable.directories)...),
 		zap.Dict("task_configs", map2fields(taskConfigs)...),
