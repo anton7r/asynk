@@ -7,7 +7,6 @@ import (
 	envUtil "asynk/util/env"
 	"asynk/watcher"
 	"context"
-	"runtime"
 	"sync"
 
 	"github.com/joho/godotenv"
@@ -265,6 +264,10 @@ func (runner *Runner) canStartTask(scheduledTask *ScheduledTask) bool {
 }
 
 func (runningTask *RunningTask) StopGracefully() {
+	if runningTask == nil {
+		return
+	}
+
 	runningTask.cancel()
 }
 
@@ -279,13 +282,38 @@ func removeRunningTask(runningTasks []*RunningTask, taskIdentifier string) []*Ru
 	return runningTasks
 }
 
+func (runner *Runner) getCommands(
+	taskConfig *config.TaskConfig,
+) []string {
+	taskId := taskConfig.Identifier
+
+	var run []string
+
+	if util.IsWindows() && !util.Empty(taskConfig.RunWindows) {
+		run = taskConfig.RunWindows
+	} else if util.IsLinux() && !util.Empty(taskConfig.RunLinux) {
+		run = taskConfig.RunLinux
+	} else if util.IsMac() && !util.Empty(taskConfig.RunMac) {
+		run = taskConfig.RunMac
+	} else if !util.Empty(taskConfig.Run) {
+		run = taskConfig.Run
+	} else {
+		runner.log.Debug("No command found for task", zap.String("taskId", taskId))
+		return nil
+	}
+
+	return run
+}
+
 func (runner *Runner) startTaskAsync(
 	scheduledTask *ScheduledTask,
 ) *RunningTask {
 	taskId := scheduledTask.TaskConfiguration.Identifier
 
+	run := runner.getCommands(scheduledTask.TaskConfiguration)
+
 	runner.log.Debug("Starting task", zap.String("taskId", taskId))
-	if len(scheduledTask.TaskConfiguration.Run) == 0 {
+	if util.Empty(run) {
 		runner.log.Debug("No command found for task", zap.String("taskId", taskId))
 		return nil
 	}
@@ -294,22 +322,6 @@ func (runner *Runner) startTaskAsync(
 
 	ctx := context.Background()
 	ctx, cancel := context.WithCancel(ctx)
-
-	var run []string
-	if len(scheduledTask.TaskConfiguration.Run) > 0 {
-		run = scheduledTask.TaskConfiguration.Run
-	} else {
-		if runtime.GOOS == "windows" {
-			run = scheduledTask.TaskConfiguration.RunWindows
-		} else if runtime.GOOS == "linux" {
-			run = scheduledTask.TaskConfiguration.RunLinux
-		} else if runtime.GOOS == "darwin" {
-			run = scheduledTask.TaskConfiguration.RunMac
-		} else {
-			runner.log.Error("Unsupported OS", zap.String("os", runtime.GOOS))
-			return nil
-		}
-	}
 
 	// This operation could as well be done later on when executing the command
 	cmds := cmdwrap.ParseAllCommands(run, taskId, runner.log, runner.env)

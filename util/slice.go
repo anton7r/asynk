@@ -9,3 +9,17 @@ func CollectMapKeys[Value any](m map[string]Value) Array[string] {
 	}
 	return keys
 }
+
+func Empty(arr []string) bool {
+	if len(arr) == 0 {
+		return true
+	}
+
+	for _, str := range arr {
+		if str != "" {
+			return false
+		}
+	}
+
+	return true
+}
