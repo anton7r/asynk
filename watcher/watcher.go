@@ -113,6 +113,11 @@ func (w *Watcher) handleFsEvents() {
 				// We can only do best approximation here, since the file is now deleted
 				// or we could perhaps cache it in memory.
 				isDir = !strings.Contains(path.Base(changePath), ".")
+				if isDir {
+					dirPath = changePath
+				} else {
+					dirPath = filepath.Dir(changePath)
+				}
 
 			} else {
 				stat, err := os.Lstat(changePath)
