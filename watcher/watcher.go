@@ -71,7 +71,7 @@ func (w *Watcher) Close() {
 
 func (w *Watcher) Start() {
 	w.watchDirs()
-	go w.handleFsEvents()
+	go w.initFsEventWatcher()
 }
 
 func (w *Watcher) watchDirs() {
@@ -89,7 +89,7 @@ func (w *Watcher) watchDirs() {
 	}
 }
 
-func (w *Watcher) handleFsEvents() {
+func (w *Watcher) initFsEventWatcher() {
 	for {
 		select {
 		case event, ok := <-w.watcher.Events:
@@ -97,50 +97,7 @@ func (w *Watcher) handleFsEvents() {
 				return
 			}
 
-			w.log.Info("File changes",
-				zap.String("eventType", event.Op.String()),
-				zap.String("filePath", event.Name),
-			)
-
-			changePath := event.Name
-
-			var dirPath string
-			var isDir bool
-			//var isRemove bool
-
-			if event.Op&fsnotify.Remove == fsnotify.Remove {
-				//isRemove = true
-				// We can only do best approximation here, since the file is now deleted
-				// or we could perhaps cache it in memory.
-				isDir = !strings.Contains(path.Base(changePath), ".")
-				if isDir {
-					dirPath = changePath
-				} else {
-					dirPath = filepath.Dir(changePath)
-				}
-
-			} else {
-				stat, err := os.Lstat(changePath)
-				if err != nil {
-					w.log.Error("Error getting file info", zap.Error(err))
-					continue
-				}
-
-				isDir = stat.IsDir()
-				if isDir {
-					dirPath = changePath
-				} else {
-					dirPath = filepath.Dir(changePath)
-				}
-			}
-
-			// Check if it is actually a file
-			if !isDir {
-				w.checkIfWeNeedToNotify(changePath, dirPath)
-			} else {
-				// TODO: Add new watchers for new directories
-
-			}
+			w.handleFsEvent(event)
 
 		case err, ok := <-w.watcher.Errors:
 			if !ok {
@@ -149,6 +106,55 @@ func (w *Watcher) handleFsEvents() {
 			w.log.Error("Error watching file system", zap.Error(err))
 		}
 	}
+}
+
+func (w *Watcher) handleFsEvent(event fsnotify.Event) {
+
+	w.log.Info("File changes",
+		zap.String("eventType", event.Op.String()),
+		zap.String("filePath", event.Name),
+	)
+
+	changePath := event.Name
+
+	var dirPath string
+	var isDir bool
+	//var isRemove bool
+
+	if event.Op&fsnotify.Remove == fsnotify.Remove {
+		//isRemove = true
+		// We can only do best approximation here, since the file is now deleted
+		// or we could perhaps cache it in memory.
+		isDir = !strings.Contains(path.Base(changePath), ".")
+		if isDir {
+			dirPath = changePath
+		} else {
+			dirPath = filepath.Dir(changePath)
+		}
+
+	} else {
+		stat, err := os.Lstat(changePath)
+		if err != nil {
+			w.log.Error("Error getting file info", zap.Error(err))
+			return
+		}
+
+		isDir = stat.IsDir()
+		if isDir {
+			dirPath = changePath
+		} else {
+			dirPath = filepath.Dir(changePath)
+		}
+	}
+
+	// Check if it is actually a file
+	if !isDir {
+		w.checkIfWeNeedToNotify(changePath, dirPath)
+	} else {
+		// TODO: Add new watchers for new directories
+
+	}
+
 }
 
 func (w *Watcher) checkIfWeNeedToNotify(changePath string, dirPath string) {
