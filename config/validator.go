@@ -86,6 +86,18 @@ func (v *validator) validateDependencies() error {
 	return nil
 }
 
+func (v *validator) validateCleanUpTasks() error {
+	for _, taskConfig := range v.config.CleanUpTasks {
+		if taskConfig.Strategy != CleanUpStrategy_KeepLatest {
+			return fmt.Errorf(
+				"invalid task type: '%s'. Expected the task type to be '%s'",
+				taskConfig.Identifier, CleanUpStrategy_KeepLatest,
+			)
+		}
+	}
+	return nil
+}
+
 func validateConfig(config *Config) error {
 	validator := createValidator(config)
 
@@ -94,6 +106,7 @@ func validateConfig(config *Config) error {
 		validator.validateRunCommand,
 		validator.validateTaskTypes,
 		validator.validateDependencies,
+		validator.validateCleanUpTasks,
 	}
 
 	for _, step := range validationSteps {

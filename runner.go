@@ -3,10 +3,9 @@ package main
 import (
 	"asynk/cmdwrap"
 	"asynk/config"
+	"asynk/files"
 	"asynk/util"
-	envUtil "asynk/util/env"
 	"asynk/watcher"
-	"context"
 	"sync"
 
 	"github.com/joho/godotenv"
@@ -18,14 +17,6 @@ type TaskCompletionCallback func(taskId string, errored bool)
 type ScheduledTask struct {
 	// Task configuration
 	TaskConfiguration *config.TaskConfig
-}
-
-type RunningTask struct {
-	// Task configuration
-	TaskConfiguration *config.TaskConfig
-	// Cancellable context
-	ctx    context.Context
-	cancel context.CancelFunc
 }
 
 type Runner struct {
@@ -95,6 +86,18 @@ func (runner *Runner) stopRunningTasks() {
 	}
 }
 
+func (runner *Runner) scheduleTasksFromSchedulableMap(tasks map[string]*config.TaskConfig) {
+	runner.ScheduledTaskMutex.Lock()
+
+	for _, task := range tasks {
+		runner.log.Debug("Scheduling task", zap.String("taskId", task.Identifier))
+		scheduledTask := &ScheduledTask{TaskConfiguration: task}
+		runner.ScheduledTasks[scheduledTask.TaskConfiguration.Identifier] = scheduledTask
+	}
+
+	runner.ScheduledTaskMutex.Unlock()
+}
+
 func (runner *Runner) scheduleTasksFromMap(tasks map[string]*config.TaskConfig) {
 	runner.ScheduledTaskMutex.Lock()
 
@@ -102,7 +105,6 @@ func (runner *Runner) scheduleTasksFromMap(tasks map[string]*config.TaskConfig) 
 		runner.log.Debug("Scheduling task", zap.String("taskId", taskConfig.Identifier))
 		scheduledTask := &ScheduledTask{TaskConfiguration: taskConfig}
 		runner.ScheduledTasks[scheduledTask.TaskConfiguration.Identifier] = scheduledTask
-
 	}
 
 	runner.ScheduledTaskMutex.Unlock()
@@ -147,24 +149,35 @@ func (runner *Runner) processEventTasks(event watcher.AggregatedEvent, schedulab
 			continue
 		}
 
-		if runner.shouldScheduleTaskForEvent(taskConfig, event.Files) {
+		files := runner.getMatchedFileChangesForTask(taskConfig, event.Files)
+		if len(files) > 0 {
 			schedulableTasks[taskId] = taskConfig
 		}
 	}
 }
 
 // shouldScheduleTaskForEvent checks if any of the changed files match the task's include patterns
-func (runner *Runner) shouldScheduleTaskForEvent(taskConfig *config.TaskConfig, files map[string]bool) bool {
+func (runner *Runner) getMatchedFileChangesForTask(taskConfig *config.TaskConfig, files map[string]bool) []string {
+	var matchedFiles []string
+
 	for file := range files {
 		runner.log.Debug("Checking if should propagate",
 			zap.String("taskId", taskConfig.Identifier),
 			zap.String("file", file),
 		)
+
+		if taskConfig.Exclude.AnyMatches(file) {
+			runner.log.Debug("File excluded from task", zap.String("file", file))
+			continue
+		}
+
 		if taskConfig.Include.AnyMatches(file) {
-			return true
+			runner.log.Debug("File matched task include pattern", zap.String("file", file))
+			matchedFiles = append(matchedFiles, file)
 		}
 	}
-	return false
+
+	return matchedFiles
 }
 
 func (runner *Runner) onFileChange(events map[string]watcher.AggregatedEvent) {
@@ -202,6 +215,54 @@ func (runner *Runner) onTaskFinished(taskIdentifier string, errored bool) {
 
 	// Try to start tasks again if there are any scheduled tasks that can be started
 	runner.startScheduledTasks()
+	runner.startCleanUp()
+}
+
+func (runner *Runner) startCleanUp() {
+	for _, cleanUpTask := range runner.Config.CleanUpTasks {
+		runner.log.Debug("Starting cleanup task", zap.String("cleanUpTaskId", cleanUpTask.Identifier))
+
+		matchedFiles, err := GetMatchedFiles(cleanUpTask, runner.Config.Shared.Exclude)
+		if err != nil {
+			runner.log.Error("Error getting deletable files", zap.Error(err))
+			continue
+		}
+
+		if len(matchedFiles) <= 1 {
+			runner.log.Debug("No files to delete for cleanup task", zap.String("taskId", cleanUpTask.Identifier))
+			continue
+		}
+
+		runner.log.Info("Files to delete for cleanup task",
+			zap.String("taskId", cleanUpTask.Identifier),
+			zap.Any("files", matchedFiles),
+		)
+
+		// Remove the newest file from the list of files to delete
+		matchedFiles = files.RemoveNewestFile(matchedFiles)
+
+		for _, file := range matchedFiles {
+			runner.log.Info("Deleting file",
+				zap.String("file", file.Path),
+				zap.String("cleanUpTaskId", cleanUpTask.Identifier),
+			)
+			/*
+				err := os.Remove(file.Path)
+				if err != nil {
+					runner.log.Error("Error deleting file",
+						zap.String("file", file.Path),
+						zap.String("cleanUpTaskId", cleanUpTask.Identifier),
+						zap.Error(err),
+					)
+					continue
+				}
+
+				runner.log.Info("Deleted file",
+					zap.String("file", file.Path),
+					zap.String("cleanUpTaskId", cleanUpTask.Identifier),
+				)*/
+		}
+	}
 }
 
 // Starts the scheduled tasks concurrently if they can be started
@@ -223,8 +284,19 @@ func (runner *Runner) startScheduledTasks() {
 			// Remove from scheduled tasks to prevent duplicate starts
 			delete(runner.ScheduledTasks, taskId)
 
-			task := runner.startTaskAsync(scheduledTask)
-			runner.onTaskStart(task)
+			taskType := scheduledTask.TaskConfiguration.Type
+			runner.log.Info("Starting task",
+				zap.String("taskId", taskId))
+
+			if taskType == config.TaskType_Continuous && runner.isTaskRunning(taskId) {
+				task := runner.getRunningTask(taskId)
+				if task != nil {
+					task.Restart()
+				}
+			} else {
+				task := runner.startTaskAsync(scheduledTask)
+				runner.onTaskStart(task)
+			}
 		}
 	}
 
@@ -237,11 +309,20 @@ func (runner *Runner) isTaskInQueue(taskIdentifier string) bool {
 
 func (runner *Runner) isTaskRunning(taskIdentifier string) bool {
 	for _, runningTask := range runner.RunningTasks {
-		if runningTask.TaskConfiguration.Identifier == taskIdentifier {
+		if runningTask.TaskId() == taskIdentifier {
 			return true
 		}
 	}
 	return false
+}
+
+func (runner *Runner) getRunningTask(taskIdentifier string) *RunningTask {
+	for _, runningTask := range runner.RunningTasks {
+		if runningTask.TaskId() == taskIdentifier {
+			return runningTask
+		}
+	}
+	return nil
 }
 
 func (runner *Runner) canStartTask(scheduledTask *ScheduledTask) bool {
@@ -251,7 +332,11 @@ func (runner *Runner) canStartTask(scheduledTask *ScheduledTask) bool {
 	}
 
 	id := scheduledTask.TaskConfiguration.Identifier
-	if runner.isTaskRunning(id) {
+	taskType := scheduledTask.TaskConfiguration.Type
+
+	// Continuous tasks are always running, so we don't need to check for them
+	// and they should be restarted if they are not running
+	if taskType != config.TaskType_Continuous && runner.isTaskRunning(id) {
 		return false
 	}
 
@@ -261,98 +346,23 @@ func (runner *Runner) canStartTask(scheduledTask *ScheduledTask) bool {
 		}
 	}
 
+	runner.log.Info("Task can be started",
+		zap.String("taskId", id))
 	return true
 }
 
-func (runningTask *RunningTask) StopGracefully() {
-	if runningTask == nil {
-		return
-	}
-
-	runningTask.cancel()
-}
-
-// Note this only removes the array occurrence
-func removeRunningTask(runningTasks []*RunningTask, taskIdentifier string) []*RunningTask {
-	for i, task := range runningTasks {
-		if task.TaskConfiguration.Identifier == taskIdentifier {
-			// Remove the task by appending the slices before and after the task
-			return append(runningTasks[:i], runningTasks[i+1:]...)
-		}
-	}
-	return runningTasks
-}
-
-func (runner *Runner) getCommands(
-	taskConfig *config.TaskConfig,
-) []string {
-	taskId := taskConfig.Identifier
-
-	var run []string
-
-	if util.IsWindows() && !util.Empty(taskConfig.RunWindows) {
-		run = taskConfig.RunWindows
-	} else if util.IsLinux() && !util.Empty(taskConfig.RunLinux) {
-		run = taskConfig.RunLinux
-	} else if util.IsMac() && !util.Empty(taskConfig.RunMac) {
-		run = taskConfig.RunMac
-	} else if !util.Empty(taskConfig.Run) {
-		run = taskConfig.Run
-	} else {
-		runner.log.Debug("No command found for task", zap.String("taskId", taskId))
-		return nil
-	}
-
-	return run
-}
-
-func (runner *Runner) startTaskAsync(
+func (r *Runner) startTaskAsync(
 	scheduledTask *ScheduledTask,
 ) *RunningTask {
-	taskId := scheduledTask.TaskConfiguration.Identifier
-
-	run := runner.getCommands(scheduledTask.TaskConfiguration)
-
-	runner.log.Debug("Starting task", zap.String("taskId", taskId))
-	if util.Empty(run) {
-		runner.log.Debug("No command found for task", zap.String("taskId", taskId))
-		return nil
-	}
-
-	env := envUtil.InterpolateEnvVariablesList(scheduledTask.TaskConfiguration.Env, runner.env)
-
-	ctx := context.Background()
-	ctx, cancel := context.WithCancel(ctx)
-
-	// This operation could as well be done later on when executing the command
-	cmds := cmdwrap.ParseAllCommands(run, taskId, runner.log, runner.env)
-
-	runningTask := &RunningTask{
-		TaskConfiguration: scheduledTask.TaskConfiguration,
-		ctx:               ctx,
-		cancel:            cancel,
-	}
+	task := NewRunningTask(
+		scheduledTask.TaskConfiguration,
+		r.log,
+		r.wrapLogger,
+		r.env,
+		r.onTaskFinished,
+	)
 
 	// Start the task in a new goroutine to avoid blocking the main thread
-	go func() {
-		for i, cmd := range cmds {
-			err := cmd.Run(ctx, env, runner.wrapLogger)
-			if err != nil {
-				runner.log.Error("Error executing command",
-					zap.String("taskId", taskId),
-					zap.Int("commandIndex", i),
-					zap.Error(err),
-				)
-
-				runner.onTaskFinished(taskId, true)
-				return
-			}
-
-		}
-
-		runner.log.Debug("Task completed successfully", zap.String("taskId", taskId))
-		runner.onTaskFinished(taskId, false)
-	}()
-
-	return runningTask
+	go task.Start()
+	return task
 }

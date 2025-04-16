@@ -20,6 +20,13 @@ const (
 	TasKType_Build TaskType = "build"
 )
 
+type CleanUpStrategy string
+
+const (
+	// Clean up strategy that removes all files matching the glob pattern except the latest one
+	CleanUpStrategy_KeepLatest CleanUpStrategy = "keep-latest"
+)
+
 type TaskConfig struct {
 	Identifier string
 	// Full command with arguments and options
@@ -39,6 +46,13 @@ type TaskConfig struct {
 	Env util.StringArray `yaml:"env"`
 }
 
+type CleanUpTaskConfig struct {
+	Identifier string
+	Include    util.GlobArray  `yaml:"include"`
+	Exclude    util.GlobArray  `yaml:"exclude"`
+	Strategy   CleanUpStrategy `yaml:"strategy"`
+}
+
 type SharedConfig struct {
 	// Shared configuration settings
 	Exclude util.GlobArray `yaml:"exclude"`
@@ -50,8 +64,9 @@ type SharedConfig struct {
 
 // The tasks id comes from the keys in the YAML file.
 type Config struct {
-	Shared SharedConfig           `yaml:"shared"`
-	Tasks  map[string]*TaskConfig `yaml:"tasks"`
+	Shared       SharedConfig                  `yaml:"shared"`
+	Tasks        map[string]*TaskConfig        `yaml:"tasks"`
+	CleanUpTasks map[string]*CleanUpTaskConfig `yaml:"cleanup-tasks"`
 }
 
 func LoadFromYAML() (*Config, error) {

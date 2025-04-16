@@ -1,7 +1,9 @@
 package cmdwrap
 
 import (
-	envUtil "asynk/util/env"
+	envUtil "asynk/util/interpolation/env"
+	"asynk/util/interpolation/idgen"
+	"asynk/util/interpolation/newestfile"
 	"bufio"
 	"context"
 	"fmt"
@@ -142,13 +144,26 @@ func (cmdWrap *CommandWrapper) readOutput(wrapLog *WrapLogger) {
 	}()
 }
 
-func ParseAllCommands(commands []string, taskId string, log *zap.Logger, env map[string]string) []*CommandWrapper {
+func ParseAllCommands(
+	commands []string,
+	taskId string,
+	log *zap.Logger,
+	env map[string]string,
+	genIdInterpolator *idgen.GenIDInterpolator,
+) []*CommandWrapper {
 	cmds := []*CommandWrapper{}
 
 	for i, command := range commands {
 		log.Debug("Parsing command", zap.Int("index", i), zap.String("command", command))
 
 		interpolatedCommand := envUtil.InterpolateEnvVariables(command, env)
+		interpolatedCommand, err := genIdInterpolator.Interpolate(interpolatedCommand)
+		if err != nil {
+			log.Error("Error interpolating command", zap.String("command", command), zap.Error(err))
+			return nil
+		}
+		interpolatedCommand = newestfile.Interpolate(interpolatedCommand)
+
 		cmdWrap := parseCommand(interpolatedCommand, taskId, log)
 		if cmdWrap != nil {
 			cmds = append(cmds, cmdWrap)

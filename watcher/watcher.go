@@ -4,7 +4,6 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
@@ -109,28 +108,34 @@ func (w *Watcher) initFsEventWatcher() {
 }
 
 func (w *Watcher) handleFsEvent(event fsnotify.Event) {
+	changePath := filepath.ToSlash(event.Name)
 
 	w.log.Info("File changes",
 		zap.String("eventType", event.Op.String()),
-		zap.String("filePath", event.Name),
+		zap.String("filePath", changePath),
 	)
-
-	changePath := event.Name
 
 	var dirPath string
 	var isDir bool
 	//var isRemove bool
 
 	if event.Op&fsnotify.Remove == fsnotify.Remove {
+		// TODO: Implement this properly
+		// We need to update the file watching configuration
+		// to allow separation of file event types.
+		// So that file deletion would not be treated as a modification
+		// in cases where modifications and etc are actually the desired
+		// events.
+
 		//isRemove = true
 		// We can only do best approximation here, since the file is now deleted
 		// or we could perhaps cache it in memory.
-		isDir = !strings.Contains(path.Base(changePath), ".")
-		if isDir {
-			dirPath = changePath
-		} else {
-			dirPath = filepath.Dir(changePath)
-		}
+		//isDir = !strings.Contains(path.Base(changePath), ".")
+		//if isDir {
+		//	dirPath = changePath
+		//} else {
+		//	dirPath = path.Dir(changePath)
+		//}
 
 	} else {
 		stat, err := os.Lstat(changePath)
@@ -143,7 +148,7 @@ func (w *Watcher) handleFsEvent(event fsnotify.Event) {
 		if isDir {
 			dirPath = changePath
 		} else {
-			dirPath = filepath.Dir(changePath)
+			dirPath = path.Dir(changePath)
 		}
 	}
 
@@ -161,7 +166,7 @@ func (w *Watcher) checkIfWeNeedToNotify(changePath string, dirPath string) {
 	directories, ok := w.directories.directories[dirPath]
 
 	if !ok {
-		w.log.Debug("Directory not found in watchable directories",
+		w.log.Info("Directory not found in watchable directories",
 			zap.String("directory", dirPath))
 		return
 	}
