@@ -5,6 +5,8 @@ import (
 	"strings"
 )
 
+var envVarPattern = regexp.MustCompile(`\${([^}]+)}`)
+
 func InterpolateEnvVariablesList(input []string, env map[string]string) []string {
 	result := make([]string, len(input))
 	for i, v := range input {
@@ -21,8 +23,7 @@ func InterpolateEnvVariablesList(input []string, env map[string]string) []string
 // If the environment variable is not found in the map, the original pattern is returned.
 // This function uses a regular expression to find and replace environment variables.
 func InterpolateEnvVariables(input string, env map[string]string) string {
-	re := regexp.MustCompile(`\${([^}]+)}`)
-	return re.ReplaceAllStringFunc(input, func(match string) string {
+	return envVarPattern.ReplaceAllStringFunc(input, func(match string) string {
 		key := strings.Trim(match[2:len(match)-1], " ")
 		if value, exists := env[key]; exists {
 			return value
