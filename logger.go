@@ -33,7 +33,10 @@ func createLogger(logLevel zapcore.Level) *zap.Logger {
 	level := zap.NewAtomicLevelAt(logLevel)
 
 	developmentCfg := zap.NewDevelopmentEncoderConfig()
-	developmentCfg.EncodeLevel = zapcore.CapitalLevelEncoder
+	developmentCfg.EncodeLevel = func(level zapcore.Level, enc zapcore.PrimitiveArrayEncoder) {
+		// Use ANSI dark grey (90) for all log levels
+		enc.AppendString(fmt.Sprintf("\x1b[90m%s", level.CapitalString()))
+	}
 	// Time is omitted, as it's not relevant for asynk
 	developmentCfg.EncodeTime = nil
 
