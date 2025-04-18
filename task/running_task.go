@@ -1,4 +1,4 @@
-package main
+package task
 
 import (
 	"asynk/cmdwrap"
@@ -7,9 +7,12 @@ import (
 	envUtil "asynk/util/interpolation/env"
 	"asynk/util/interpolation/idgen"
 	"context"
+	"time"
 
 	"go.uber.org/zap"
 )
+
+type TaskCompletionCallback func(taskId string, errored bool)
 
 type RunningTask struct {
 	// Task configuration
@@ -23,6 +26,7 @@ type RunningTask struct {
 	wrapLogger             *cmdwrap.WrapLogger
 	onTaskFinishedCallback TaskCompletionCallback
 	pendingRestart         bool
+	startTime              time.Time
 }
 
 func initializeContext() (context.Context, context.CancelFunc) {
@@ -66,13 +70,14 @@ func NewRunningTask(
 		wrapLogger:             wrapLogger,
 		onTaskFinishedCallback: onTaskFinished,
 		pendingRestart:         false,
+		startTime:              time.Now(),
 	}
 
 	return runningTask
 }
 
 // Note this only removes the array occurrence
-func removeRunningTask(runningTasks []*RunningTask, taskIdentifier string) []*RunningTask {
+func RemoveRunningTask(runningTasks []*RunningTask, taskIdentifier string) []*RunningTask {
 	for i, task := range runningTasks {
 		if task.taskConfig.Identifier == taskIdentifier {
 			// Remove the task by appending the slices before and after the task
@@ -129,39 +134,44 @@ func (r *RunningTask) Start() {
 	r.onTaskFinished(taskId, false)
 }
 
-func (rTask *RunningTask) StopGracefully() {
-	if rTask == nil {
+func (r *RunningTask) StopGracefully() {
+	if r == nil {
 		return
 	}
 
-	rTask.cancel()
+	r.cancel()
 }
 
-func (rTask *RunningTask) Restart() {
-	if rTask == nil {
+func (r *RunningTask) Restart() {
+	if r == nil {
 		return
 	}
 
-	rTask.pendingRestart = true
-	rTask.cancel()
+	r.pendingRestart = true
+	r.cancel()
 }
 
-func (rTask RunningTask) TaskId() string {
-	return rTask.taskConfig.Identifier
+func (r RunningTask) TaskId() string {
+	return r.taskConfig.Identifier
 }
 
-func (rTask RunningTask) onTaskFinished(
+func (r RunningTask) StartTime() time.Time {
+	return r.startTime
+}
+
+func (r RunningTask) onTaskFinished(
 	taskId string,
 	isError bool,
 ) {
-	if rTask.pendingRestart {
-		rTask.pendingRestart = false
-		rTask.ctx, rTask.cancel = initializeContext()
+	if r.pendingRestart {
+		r.pendingRestart = false
+		r.startTime = time.Now()
+		r.ctx, r.cancel = initializeContext()
 
-		rTask.log.Info("Restarting task", zap.String("taskId", taskId))
-		rTask.Start()
+		r.log.Info("Restarting task", zap.String("taskId", taskId))
+		r.Start()
 		return
 	}
 
-	rTask.onTaskFinishedCallback(taskId, isError)
+	r.onTaskFinishedCallback(taskId, isError)
 }

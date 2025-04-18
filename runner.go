@@ -4,15 +4,22 @@ import (
 	"asynk/cmdwrap"
 	"asynk/config"
 	"asynk/files"
+	"asynk/task"
 	"asynk/util"
 	"asynk/watcher"
+	"os"
 	"sync"
+	"time"
 
 	"github.com/joho/godotenv"
 	"go.uber.org/zap"
 )
 
-type TaskCompletionCallback func(taskId string, errored bool)
+type SchedulableTask struct {
+	TaskConfiguration *config.TaskConfig
+	// The
+	ModificationTime time.Time
+}
 
 type ScheduledTask struct {
 	// Task configuration
@@ -25,7 +32,7 @@ type Runner struct {
 	// List of scheduled tasks
 	ScheduledTasks     map[string]*ScheduledTask
 	ScheduledTaskMutex sync.Mutex
-	RunningTasks       []*RunningTask
+	RunningTasks       []*task.RunningTask
 	RunningTaskMutex   sync.Mutex
 	log                *zap.Logger
 	wrapLogger         *cmdwrap.WrapLogger
@@ -37,7 +44,7 @@ func NewRunner(configuration *config.Config, log *zap.Logger) *Runner {
 	runner := &Runner{
 		Config:         configuration,
 		ScheduledTasks: make(map[string]*ScheduledTask, 0),
-		RunningTasks:   make([]*RunningTask, 0),
+		RunningTasks:   make([]*task.RunningTask, 0),
 		log:            log,
 		env:            make(map[string]string),
 	}
@@ -86,28 +93,68 @@ func (runner *Runner) stopRunningTasks() {
 	}
 }
 
-func (runner *Runner) scheduleTasksFromSchedulableMap(tasks map[string]*config.TaskConfig) {
-	runner.ScheduledTaskMutex.Lock()
+func (runner *Runner) filterRunningTasks(
+	taskConfigs map[string]*SchedulableTask) map[string]*SchedulableTask {
+	runner.RunningTaskMutex.Lock()
+	defer runner.RunningTaskMutex.Unlock()
 
-	for _, task := range tasks {
-		runner.log.Debug("Scheduling task", zap.String("taskId", task.Identifier))
-		scheduledTask := &ScheduledTask{TaskConfiguration: task}
-		runner.ScheduledTasks[scheduledTask.TaskConfiguration.Identifier] = scheduledTask
+	runnerTasks := make(map[string]*SchedulableTask, 0)
+	for taskId, s := range taskConfigs {
+		// Maybe unnecessary, but just in case
+		if s.TaskConfiguration.Type == config.TaskType_Continuous {
+			runner.log.Debug("Skipping continuous task", zap.String("taskId", taskId))
+			continue
+		}
+
+		task := runner.getRunningTask(taskId)
+		if task != nil && task.StartTime().After(s.ModificationTime) {
+			runner.log.Info("Skipping task as it's already running with up to date information", zap.String("taskId", taskId))
+			continue
+		}
+
+		runnerTasks[taskId] = s
 	}
 
-	runner.ScheduledTaskMutex.Unlock()
+	return runnerTasks
+}
+
+func (runner *Runner) filterScheduledTasks(
+	taskConfigs map[string]*SchedulableTask) map[string]*SchedulableTask {
+	runner.ScheduledTaskMutex.Lock()
+	defer runner.ScheduledTaskMutex.Unlock()
+
+	schedulableTasks := make(map[string]*SchedulableTask, 0)
+	for taskId, s := range taskConfigs {
+		if s.TaskConfiguration.Type == config.TaskType_Continuous {
+			runner.log.Debug("Skipping continuous task", zap.String("taskId", taskId))
+			continue
+		}
+		schedulableTasks[taskId] = s
+	}
+
+	return schedulableTasks
+}
+
+func (runner *Runner) scheduleTasksFromSchedulableMap(tasks map[string]*SchedulableTask) {
+	runner.ScheduledTaskMutex.Lock()
+	defer runner.ScheduledTaskMutex.Unlock()
+
+	for _, s := range tasks {
+		runner.log.Debug("Scheduling task", zap.String("taskId", s.TaskConfiguration.Identifier))
+		scheduledTask := &ScheduledTask{TaskConfiguration: s.TaskConfiguration}
+		runner.ScheduledTasks[scheduledTask.TaskConfiguration.Identifier] = scheduledTask
+	}
 }
 
 func (runner *Runner) scheduleTasksFromMap(tasks map[string]*config.TaskConfig) {
 	runner.ScheduledTaskMutex.Lock()
+	defer runner.ScheduledTaskMutex.Unlock()
 
 	for _, taskConfig := range tasks {
 		runner.log.Debug("Scheduling task", zap.String("taskId", taskConfig.Identifier))
 		scheduledTask := &ScheduledTask{TaskConfiguration: taskConfig}
 		runner.ScheduledTasks[scheduledTask.TaskConfiguration.Identifier] = scheduledTask
 	}
-
-	runner.ScheduledTaskMutex.Unlock()
 }
 
 func (runner *Runner) scheduleAllTasks() {
@@ -117,8 +164,8 @@ func (runner *Runner) scheduleAllTasks() {
 // findTasksAffectedByFileChanges identifies which tasks should be scheduled based on file changes
 func (runner *Runner) findTasksAffectedByFileChanges(
 	events map[string]watcher.AggregatedEvent,
-) map[string]*config.TaskConfig {
-	schedulableTasks := make(map[string]*config.TaskConfig, 0)
+) map[string]*SchedulableTask {
+	schedulableTasks := make(map[string]*SchedulableTask, 0)
 
 	for _, event := range events {
 		if len(schedulableTasks) == len(runner.Config.Tasks) {
@@ -134,7 +181,7 @@ func (runner *Runner) findTasksAffectedByFileChanges(
 }
 
 // processEventTasks processes tasks affected by a single event
-func (runner *Runner) processEventTasks(event watcher.AggregatedEvent, schedulableTasks map[string]*config.TaskConfig) {
+func (runner *Runner) processEventTasks(event watcher.AggregatedEvent, schedulableTasks map[string]*SchedulableTask) {
 	for taskId := range event.Tasks {
 		runner.log.Debug("Checking if task should be scheduled", zap.String("taskId", taskId))
 
@@ -149,18 +196,22 @@ func (runner *Runner) processEventTasks(event watcher.AggregatedEvent, schedulab
 			continue
 		}
 
-		files := runner.getMatchedFileChangesForTask(taskConfig, event.Files)
+		files, time := runner.getMatchedFileChangesForTask(taskConfig, event.Files)
 		if len(files) > 0 {
-			schedulableTasks[taskId] = taskConfig
+			schedulableTasks[taskId] = &SchedulableTask{taskConfig, time}
 		}
 	}
 }
 
 // shouldScheduleTaskForEvent checks if any of the changed files match the task's include patterns
-func (runner *Runner) getMatchedFileChangesForTask(taskConfig *config.TaskConfig, files map[string]bool) []string {
+func (runner *Runner) getMatchedFileChangesForTask(
+	taskConfig *config.TaskConfig,
+	files map[string]*watcher.UpdatedFile,
+) ([]string, time.Time) {
 	var matchedFiles []string
+	var latestTime time.Time
 
-	for file := range files {
+	for file, updatedEvent := range files {
 		runner.log.Debug("Checking if should propagate",
 			zap.String("taskId", taskConfig.Identifier),
 			zap.String("file", file),
@@ -174,31 +225,44 @@ func (runner *Runner) getMatchedFileChangesForTask(taskConfig *config.TaskConfig
 		if taskConfig.Include.AnyMatches(file) {
 			runner.log.Debug("File matched task include pattern", zap.String("file", file))
 			matchedFiles = append(matchedFiles, file)
+
+			if updatedEvent.ModifiedTime.After(latestTime) {
+				latestTime = updatedEvent.ModifiedTime
+			}
 		}
 	}
 
-	return matchedFiles
+	return matchedFiles, latestTime
 }
 
 func (runner *Runner) onFileChange(events map[string]watcher.AggregatedEvent) {
-	// Maybe unnecessary
-	//runner.log.Info("Handling Propagated file change event")
-
 	// Find tasks affected by file changes
+	// TODO: We could optimize this by passing
 	schedulableTasks := runner.findTasksAffectedByFileChanges(events)
+	schedulableTasks = runner.filterScheduledTasks(schedulableTasks)
+	schedulableTasks = runner.filterRunningTasks(schedulableTasks)
+
+	if len(schedulableTasks) == 0 {
+		runner.log.Info("No tasks to schedule based on file changes",
+			zap.Any("files", events),
+			zap.Int("count", len(schedulableTasks)),
+		)
+		return
+	}
 
 	runner.log.Info(
 		"Propagated file change event handled, scheduling tasks",
 		zap.Int("count", len(schedulableTasks)),
 		zap.Strings("tasks", util.CollectMapKeys(schedulableTasks)),
+		zap.Any("files", events),
 	)
 
 	// Schedule and start the affected tasks
-	runner.scheduleTasksFromMap(schedulableTasks)
+	runner.scheduleTasksFromSchedulableMap(schedulableTasks)
 	runner.startScheduledTasks()
 }
 
-func (runner *Runner) onTaskStart(runningTask *RunningTask) {
+func (runner *Runner) onTaskStart(runningTask *task.RunningTask) {
 	runner.RunningTaskMutex.Lock()
 	runner.RunningTasks = append(runner.RunningTasks, runningTask)
 	runner.RunningTaskMutex.Unlock()
@@ -206,7 +270,7 @@ func (runner *Runner) onTaskStart(runningTask *RunningTask) {
 
 func (runner *Runner) onTaskFinished(taskIdentifier string, errored bool) {
 	runner.RunningTaskMutex.Lock()
-	runner.RunningTasks = removeRunningTask(runner.RunningTasks, taskIdentifier)
+	runner.RunningTasks = task.RemoveRunningTask(runner.RunningTasks, taskIdentifier)
 	runner.RunningTaskMutex.Unlock()
 
 	if errored {
@@ -233,7 +297,7 @@ func (runner *Runner) startCleanUp() {
 			continue
 		}
 
-		runner.log.Info("Files to delete for cleanup task",
+		runner.log.Debug("Files to delete for cleanup task",
 			zap.String("taskId", cleanUpTask.Identifier),
 			zap.Any("files", matchedFiles),
 		)
@@ -242,25 +306,25 @@ func (runner *Runner) startCleanUp() {
 		matchedFiles = files.RemoveNewestFile(matchedFiles)
 
 		for _, file := range matchedFiles {
-			runner.log.Info("Deleting file",
+			runner.log.Debug("Deleting file",
 				zap.String("file", file.Path),
 				zap.String("cleanUpTaskId", cleanUpTask.Identifier),
 			)
-			/*
-				err := os.Remove(file.Path)
-				if err != nil {
-					runner.log.Error("Error deleting file",
-						zap.String("file", file.Path),
-						zap.String("cleanUpTaskId", cleanUpTask.Identifier),
-						zap.Error(err),
-					)
-					continue
-				}
 
-				runner.log.Info("Deleted file",
+			err := os.Remove(file.Path)
+			if err != nil {
+				runner.log.Info("Could not delete file",
 					zap.String("file", file.Path),
 					zap.String("cleanUpTaskId", cleanUpTask.Identifier),
-				)*/
+					zap.Error(err),
+				)
+				continue
+			}
+
+			runner.log.Debug("Deleted file",
+				zap.String("file", file.Path),
+				zap.String("cleanUpTaskId", cleanUpTask.Identifier),
+			)
 		}
 	}
 }
@@ -285,8 +349,6 @@ func (runner *Runner) startScheduledTasks() {
 			delete(runner.ScheduledTasks, taskId)
 
 			taskType := scheduledTask.TaskConfiguration.Type
-			runner.log.Info("Starting task",
-				zap.String("taskId", taskId))
 
 			if taskType == config.TaskType_Continuous && runner.isTaskRunning(taskId) {
 				task := runner.getRunningTask(taskId)
@@ -316,7 +378,7 @@ func (runner *Runner) isTaskRunning(taskIdentifier string) bool {
 	return false
 }
 
-func (runner *Runner) getRunningTask(taskIdentifier string) *RunningTask {
+func (runner *Runner) getRunningTask(taskIdentifier string) *task.RunningTask {
 	for _, runningTask := range runner.RunningTasks {
 		if runningTask.TaskId() == taskIdentifier {
 			return runningTask
@@ -353,8 +415,8 @@ func (runner *Runner) canStartTask(scheduledTask *ScheduledTask) bool {
 
 func (r *Runner) startTaskAsync(
 	scheduledTask *ScheduledTask,
-) *RunningTask {
-	task := NewRunningTask(
+) *task.RunningTask {
+	task := task.NewRunningTask(
 		scheduledTask.TaskConfiguration,
 		r.log,
 		r.wrapLogger,

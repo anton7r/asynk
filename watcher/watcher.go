@@ -19,11 +19,15 @@ type Watcher struct {
 	propagateChangeEvent func(events map[string]AggregatedEvent)
 }
 
+type UpdatedFile struct {
+	ModifiedTime time.Time
+}
+
 type AggregatedEvent struct {
 	// Relative path to the where the asynk command was run.
 	Dir string
 	// Relative path to the where the asynk command was run.
-	Files map[string]bool
+	Files map[string]*UpdatedFile
 	// Tasks ids that could be wait for the completion.
 	// We use the wording "could be" because we cannot be
 	// certain that the file which triggered the event actually
@@ -117,6 +121,7 @@ func (w *Watcher) handleFsEvent(event fsnotify.Event) {
 
 	var dirPath string
 	var isDir bool
+	var modifiedTime time.Time
 	//var isRemove bool
 
 	if event.Op&fsnotify.Remove == fsnotify.Remove {
@@ -144,6 +149,7 @@ func (w *Watcher) handleFsEvent(event fsnotify.Event) {
 			return
 		}
 
+		modifiedTime = stat.ModTime()
 		isDir = stat.IsDir()
 		if isDir {
 			dirPath = changePath
@@ -154,7 +160,7 @@ func (w *Watcher) handleFsEvent(event fsnotify.Event) {
 
 	// Check if it is actually a file
 	if !isDir {
-		w.checkIfWeNeedToNotify(changePath, dirPath)
+		w.checkIfWeNeedToNotify(changePath, dirPath, modifiedTime)
 	} else {
 		// TODO: Add new watchers for new directories
 
@@ -162,7 +168,11 @@ func (w *Watcher) handleFsEvent(event fsnotify.Event) {
 
 }
 
-func (w *Watcher) checkIfWeNeedToNotify(changePath string, dirPath string) {
+func (w *Watcher) checkIfWeNeedToNotify(
+	changePath string,
+	dirPath string,
+	modifiedTime time.Time,
+) {
 	directories, ok := w.directories.directories[dirPath]
 
 	if !ok {
@@ -179,12 +189,14 @@ func (w *Watcher) checkIfWeNeedToNotify(changePath string, dirPath string) {
 		if !exists {
 			event = AggregatedEvent{
 				Dir:   dirPath,
-				Files: make(map[string]bool),
+				Files: make(map[string]*UpdatedFile),
 				Tasks: make(map[string]bool),
 			}
 		}
 
-		event.Files[changePath] = true
+		event.Files[changePath] = &UpdatedFile{
+			ModifiedTime: modifiedTime,
+		}
 		for taskId := range tasks {
 			event.Tasks[taskId] = true
 		}

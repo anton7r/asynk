@@ -2,7 +2,6 @@ package newestfile
 
 import (
 	"asynk/files"
-	"log"
 	"regexp"
 	"strings"
 )
@@ -13,21 +12,12 @@ func Interpolate(input string) string {
 	return newestFilePattern.ReplaceAllStringFunc(input, func(match string) string {
 		key := strings.Trim(match[2:len(match)-1], " ")
 
-		log.Println("Newest file pattern found: ", key)
-		log.Println("Newest file pattern found: ", key)
-		log.Println("Newest file pattern found: ", key)
-		log.Println("Newest file pattern found: ", key)
-		log.Println("Newest file pattern found: ", key)
-		log.Println("Newest file pattern found: ", key)
-		log.Println("Newest file pattern found: ", key)
-		log.Println("Newest file pattern found: ", key)
-
 		inDir, err := files.GetFilesInDir(key)
 		if err != nil {
 			return match // Return the original pattern if the directory is not found
 		}
 
-		log.Println("Newest file in directory: ", inDir)
+		//log.Println("Newest file in directory: ", inDir)
 
 		if len(inDir) == 0 {
 			return match // Return the original pattern if no files are found
