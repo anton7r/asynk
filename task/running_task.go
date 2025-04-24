@@ -123,6 +123,7 @@ func (r *RunningTask) Start() {
 			)
 
 			r.onTaskFinished(taskId, true)
+			r.cancel() // Ensure Done fires on error
 			return
 		}
 
@@ -130,6 +131,7 @@ func (r *RunningTask) Start() {
 
 	r.log.Info("Task completed successfully", zap.String("taskId", taskId))
 	r.onTaskFinished(taskId, false)
+	r.cancel() // Ensure Done fires on success
 }
 
 func (r *RunningTask) StopGracefully() {
@@ -138,6 +140,19 @@ func (r *RunningTask) StopGracefully() {
 	}
 
 	r.cancel()
+}
+
+func (r *RunningTask) Wait() {
+	if r == nil {
+		return
+	}
+
+	if r.ctx == nil {
+		r.log.Error("Context is nil, cannot wait for task completion")
+		return
+	}
+
+	<-r.ctx.Done()
 }
 
 func (r RunningTask) TaskId() string {

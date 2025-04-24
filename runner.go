@@ -100,12 +100,6 @@ func (runner *Runner) filterRunningTasks(
 
 	runnerTasks := make(map[string]*SchedulableTask, 0)
 	for taskId, s := range taskConfigs {
-		// Maybe unnecessary, but just in case
-		if s.TaskConfiguration.Type == config.TaskType_Continuous {
-			runner.log.Debug("Skipping continuous task", zap.String("taskId", taskId))
-			continue
-		}
-
 		task := runner.getRunningTask(taskId)
 		if task != nil && task.StartTime().After(s.ModificationTime) {
 			runner.log.Info("Skipping task as it's already running with up to date information", zap.String("taskId", taskId))
@@ -116,23 +110,6 @@ func (runner *Runner) filterRunningTasks(
 	}
 
 	return runnerTasks
-}
-
-func (runner *Runner) filterScheduledTasks(
-	taskConfigs map[string]*SchedulableTask) map[string]*SchedulableTask {
-	runner.ScheduledTaskMutex.Lock()
-	defer runner.ScheduledTaskMutex.Unlock()
-
-	schedulableTasks := make(map[string]*SchedulableTask, 0)
-	for taskId, s := range taskConfigs {
-		if s.TaskConfiguration.Type == config.TaskType_Continuous {
-			runner.log.Debug("Skipping continuous task", zap.String("taskId", taskId))
-			continue
-		}
-		schedulableTasks[taskId] = s
-	}
-
-	return schedulableTasks
 }
 
 func (runner *Runner) scheduleTasksFromSchedulableMap(tasks map[string]*SchedulableTask) {
@@ -237,9 +214,8 @@ func (runner *Runner) getMatchedFileChangesForTask(
 
 func (runner *Runner) onFileChange(events map[string]watcher.AggregatedEvent) {
 	// Find tasks affected by file changes
-	// TODO: We could optimize this by passing
+	// TODO: We could optimize this by passing range funcs
 	schedulableTasks := runner.findTasksAffectedByFileChanges(events)
-	schedulableTasks = runner.filterScheduledTasks(schedulableTasks)
 	schedulableTasks = runner.filterRunningTasks(schedulableTasks)
 
 	if len(schedulableTasks) == 0 {
@@ -351,8 +327,24 @@ func (runner *Runner) startScheduledTasks() {
 			taskType := scheduledTask.TaskConfiguration.Type
 
 			if taskType == config.TaskType_Continuous && runner.isTaskRunning(taskId) {
-				//task := runner.getRunningTask(taskId)
-				// TODO: IMPLEMENT RESTARTING OF TASKS
+				// Restart the running continuous task
+				runner.RunningTaskMutex.Lock()
+				runningTask := runner.getRunningTask(taskId)
+				runner.RunningTaskMutex.Unlock()
+				if runningTask != nil {
+					runningTask.StopGracefully()
+					// Wait for the task to exit before starting a new one
+					runner.log.Info("Waiting for running task to finish before starting a new one",
+						zap.String("taskId", taskId))
+					runningTask.Wait()
+					runner.log.Info("Running task finished, starting new instance")
+					runner.RunningTaskMutex.Lock()
+					runner.RunningTasks = task.RemoveRunningTask(runner.RunningTasks, taskId)
+					runner.RunningTaskMutex.Unlock()
+				}
+				// Start a new instance
+				task := runner.startTaskAsync(scheduledTask)
+				runner.onTaskStart(task)
 			} else {
 				task := runner.startTaskAsync(scheduledTask)
 				runner.onTaskStart(task)
