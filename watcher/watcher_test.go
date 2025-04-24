@@ -114,7 +114,7 @@ func TestCheckIfWeNeedToNotify(t *testing.T) {
 	assert.NoError(t, err)
 
 	// Test the method
-	watcher.checkIfWeNeedToNotify(testFilePath, testDirPath)
+	watcher.checkIfWeNeedToNotify(testFilePath, testDirPath, time.Now())
 
 	// Wait for propagation with timeout
 	select {
@@ -227,8 +227,10 @@ func TestFileEventAggregator(t *testing.T) {
 	taskId1 := "task1"
 
 	event := AggregatedEvent{
-		Dir:   dir1,
-		Files: map[string]bool{file1: true},
+		Dir: dir1,
+		Files: map[string]*UpdatedFile{file1: &UpdatedFile{
+			ModifiedTime: time.Now(),
+		}},
 		Tasks: map[string]bool{taskId1: true},
 	}
 
@@ -267,7 +269,7 @@ func TestPropagateEvents(t *testing.T) {
 
 	event := AggregatedEvent{
 		Dir:   dir1,
-		Files: map[string]bool{file1: true},
+		Files: map[string]*UpdatedFile{file1: &UpdatedFile{ModifiedTime: time.Now()}},
 		Tasks: map[string]bool{taskId1: true},
 	}
 

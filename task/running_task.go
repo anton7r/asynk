@@ -18,15 +18,14 @@ type RunningTask struct {
 	// Task configuration
 	taskConfig *config.TaskConfig
 	// Cancellable context
-	ctx                    context.Context
-	cancel                 context.CancelFunc
-	cmds                   []*cmdwrap.CommandWrapper
-	localEnv               []string
-	log                    *zap.Logger
-	wrapLogger             *cmdwrap.WrapLogger
-	onTaskFinishedCallback TaskCompletionCallback
-	pendingRestart         bool
-	startTime              time.Time
+	ctx            context.Context
+	cancel         context.CancelFunc
+	cmds           []*cmdwrap.CommandWrapper
+	localEnv       []string
+	log            *zap.Logger
+	wrapLogger     *cmdwrap.WrapLogger
+	onTaskFinished TaskCompletionCallback
+	startTime      time.Time
 }
 
 func initializeContext() (context.Context, context.CancelFunc) {
@@ -61,16 +60,15 @@ func NewRunningTask(
 	ctx, cancel := initializeContext()
 
 	runningTask := &RunningTask{
-		taskConfig:             taskConfig,
-		ctx:                    ctx,
-		cancel:                 cancel,
-		cmds:                   cmds,
-		localEnv:               localEnv,
-		log:                    log,
-		wrapLogger:             wrapLogger,
-		onTaskFinishedCallback: onTaskFinished,
-		pendingRestart:         false,
-		startTime:              time.Now(),
+		taskConfig:     taskConfig,
+		ctx:            ctx,
+		cancel:         cancel,
+		cmds:           cmds,
+		localEnv:       localEnv,
+		log:            log,
+		wrapLogger:     wrapLogger,
+		onTaskFinished: onTaskFinished,
+		startTime:      time.Now(),
 	}
 
 	return runningTask
@@ -142,36 +140,10 @@ func (r *RunningTask) StopGracefully() {
 	r.cancel()
 }
 
-func (r *RunningTask) Restart() {
-	if r == nil {
-		return
-	}
-
-	r.pendingRestart = true
-	r.cancel()
-}
-
 func (r RunningTask) TaskId() string {
 	return r.taskConfig.Identifier
 }
 
 func (r RunningTask) StartTime() time.Time {
 	return r.startTime
-}
-
-func (r RunningTask) onTaskFinished(
-	taskId string,
-	isError bool,
-) {
-	if r.pendingRestart {
-		r.pendingRestart = false
-		r.startTime = time.Now()
-		r.ctx, r.cancel = initializeContext()
-
-		r.log.Info("Restarting task", zap.String("taskId", taskId))
-		r.Start()
-		return
-	}
-
-	r.onTaskFinishedCallback(taskId, isError)
 }

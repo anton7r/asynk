@@ -351,10 +351,8 @@ func (runner *Runner) startScheduledTasks() {
 			taskType := scheduledTask.TaskConfiguration.Type
 
 			if taskType == config.TaskType_Continuous && runner.isTaskRunning(taskId) {
-				task := runner.getRunningTask(taskId)
-				if task != nil {
-					task.Restart()
-				}
+				//task := runner.getRunningTask(taskId)
+				// TODO: IMPLEMENT RESTARTING OF TASKS
 			} else {
 				task := runner.startTaskAsync(scheduledTask)
 				runner.onTaskStart(task)
