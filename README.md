@@ -91,3 +91,11 @@ Once you have configured `asynk.yaml`, the next steps would be to run the follow
 ```sh
 asynk
 ```
+
+### Command Line Options
+
+- `--once`: Run all tasks once and exit without watching for file changes. This is useful for CI/CD pipelines or one-time builds where you don't need the file watcher.
+
+  ```sh
+  asynk --once
+  ```

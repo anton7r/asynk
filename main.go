@@ -3,12 +3,17 @@ package main
 import (
 	"asynk/config"
 	"context"
+	"flag"
 	"fmt"
 	"os/signal"
 	"syscall"
 )
 
 func main() {
+	// Parse command line flags
+	runOnce := flag.Bool("once", false, "Run all tasks once and exit without watching for file changes")
+	flag.Parse()
+
 	fmt.Println("Asynk is starting...")
 
 	configuration, err := config.LoadFromYAML()
@@ -26,17 +31,24 @@ func main() {
 	log := createLogger(logLevel)
 
 	// Create a new application state
-	runner := NewRunner(configuration, log)
+	runner := NewRunner(configuration, log, *runOnce)
 
-	log.Info("Press Ctrl+C to stop Asynk.")
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
+	if *runOnce {
+		log.Info("Running in single-run mode (no file watching)")
+		runner.Start()
+		runner.WaitForCompletion()
+		log.Info("All tasks completed. Exiting.")
+	} else {
+		log.Info("Press Ctrl+C to stop Asynk.")
+		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+		defer stop()
 
-	go runner.Start()
+		go runner.Start()
 
-	<-ctx.Done()
-	log.Info("Interrupt signal received . Stopping all running tasks...")
-	runner.Stop()
+		<-ctx.Done()
+		log.Info("Interrupt signal received . Stopping all running tasks...")
+		runner.Stop()
 
-	log.Info("Asynk exited gracefully. All running tasks stopped.")
+		log.Info("Asynk exited gracefully. All running tasks stopped.")
+	}
 }

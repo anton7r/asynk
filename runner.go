@@ -38,15 +38,19 @@ type Runner struct {
 	wrapLogger         *cmdwrap.WrapLogger
 	watch              *watcher.Watcher
 	env                map[string]string
+	runOnce            bool
+	completionChan     chan struct{}
 }
 
-func NewRunner(configuration *config.Config, log *zap.Logger) *Runner {
+func NewRunner(configuration *config.Config, log *zap.Logger, runOnce bool) *Runner {
 	runner := &Runner{
 		Config:         configuration,
 		ScheduledTasks: make(map[string]*ScheduledTask, 0),
 		RunningTasks:   make([]*task.RunningTask, 0),
 		log:            log,
 		env:            make(map[string]string),
+		runOnce:        runOnce,
+		completionChan: make(chan struct{}),
 	}
 
 	taskIds := make([]string, 0, len(configuration.Tasks))
@@ -54,15 +58,19 @@ func NewRunner(configuration *config.Config, log *zap.Logger) *Runner {
 		taskIds = append(taskIds, taskId)
 	}
 
-	watchableDirectories := watcher.MatchWatchableDirectories(log, configuration.Shared.Exclude, configuration.Tasks)
-	var err error
-	runner.watch, err = watcher.NewWatcher(log, watchableDirectories, runner.onFileChange)
-	if err != nil {
-		log.Error("Error creating watcher", zap.Error(err))
+	// Only initialize watcher if not in single-run mode
+	if !runOnce {
+		watchableDirectories := watcher.MatchWatchableDirectories(log, configuration.Shared.Exclude, configuration.Tasks)
+		var err error
+		runner.watch, err = watcher.NewWatcher(log, watchableDirectories, runner.onFileChange)
+		if err != nil {
+			log.Error("Error creating watcher", zap.Error(err))
+		}
 	}
 
 	runner.wrapLogger = cmdwrap.NewWrapLogger(taskIds)
 
+	var err error
 	runner.env, err = godotenv.Read(configuration.Shared.EnvFiles...)
 	if err != nil {
 		log.Error("Error loading environment variables", zap.Error(err))
@@ -72,7 +80,10 @@ func NewRunner(configuration *config.Config, log *zap.Logger) *Runner {
 }
 
 func (runner *Runner) Start() {
-	runner.watch.Start()
+	// Only start watcher if not in single-run mode
+	if !runner.runOnce && runner.watch != nil {
+		runner.watch.Start()
+	}
 
 	// Schedule all tasks and start them concurrently
 	runner.scheduleAllTasks()
@@ -82,7 +93,9 @@ func (runner *Runner) Start() {
 }
 
 func (runner *Runner) Stop() {
-	runner.watch.Close()
+	if runner.watch != nil {
+		runner.watch.Close()
+	}
 
 	runner.stopRunningTasks()
 }
@@ -247,15 +260,35 @@ func (runner *Runner) onTaskStart(runningTask *task.RunningTask) {
 func (runner *Runner) onTaskFinished(taskIdentifier string, errored bool) {
 	runner.RunningTaskMutex.Lock()
 	runner.RunningTasks = task.RemoveRunningTask(runner.RunningTasks, taskIdentifier)
+	runningCount := len(runner.RunningTasks)
 	runner.RunningTaskMutex.Unlock()
 
 	if errored {
+		// In single-run mode, check if all tasks are done
+		if runner.runOnce {
+			runner.checkCompletion()
+		}
 		return
 	}
 
 	// Try to start tasks again if there are any scheduled tasks that can be started
 	runner.startScheduledTasks()
 	runner.startCleanUp()
+
+	// In single-run mode, check if all tasks are done
+	if runner.runOnce {
+		runner.ScheduledTaskMutex.Lock()
+		scheduledCount := len(runner.ScheduledTasks)
+		runner.ScheduledTaskMutex.Unlock()
+
+		if runningCount == 0 && scheduledCount == 0 {
+			runner.log.Info("All tasks completed in single-run mode")
+			select {
+			case runner.completionChan <- struct{}{}:
+			default:
+			}
+		}
+	}
 }
 
 func (runner *Runner) startCleanUp() {
@@ -417,4 +450,28 @@ func (r *Runner) startTaskAsync(
 	// Start the task in a new goroutine to avoid blocking the main thread
 	go task.Start()
 	return task
+}
+
+// WaitForCompletion blocks until all tasks have completed in single-run mode
+func (runner *Runner) WaitForCompletion() {
+	<-runner.completionChan
+}
+
+// checkCompletion checks if all tasks are done and signals completion if in single-run mode
+func (runner *Runner) checkCompletion() {
+	runner.RunningTaskMutex.Lock()
+	runningCount := len(runner.RunningTasks)
+	runner.RunningTaskMutex.Unlock()
+
+	runner.ScheduledTaskMutex.Lock()
+	scheduledCount := len(runner.ScheduledTasks)
+	runner.ScheduledTaskMutex.Unlock()
+
+	if runningCount == 0 && scheduledCount == 0 {
+		runner.log.Info("All tasks completed in single-run mode")
+		select {
+		case runner.completionChan <- struct{}{}:
+		default:
+		}
+	}
 }
