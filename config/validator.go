@@ -1,8 +1,9 @@
 package config
 
 import (
-	"asynk/util"
 	"fmt"
+
+	"github.com/anton7r/asynk/util"
 )
 
 type validator struct {

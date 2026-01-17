@@ -1,15 +1,16 @@
 package cmdwrap
 
 import (
-	envUtil "asynk/util/interpolation/env"
-	"asynk/util/interpolation/idgen"
-	"asynk/util/interpolation/newestfile"
 	"bufio"
 	"context"
 	"fmt"
 	"io"
 	"os/exec"
 	"strings"
+
+	envUtil "github.com/anton7r/asynk/util/interpolation/env"
+	"github.com/anton7r/asynk/util/interpolation/idgen"
+	"github.com/anton7r/asynk/util/interpolation/newestfile"
 
 	"go.uber.org/zap"
 )

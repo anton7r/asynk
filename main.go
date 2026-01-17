@@ -1,12 +1,13 @@
 package main
 
 import (
-	"asynk/config"
 	"context"
 	"flag"
 	"fmt"
 	"os/signal"
 	"syscall"
+
+	"github.com/anton7r/asynk/config"
 )
 
 func main() {
@@ -14,7 +15,7 @@ func main() {
 	runOnce := flag.Bool("once", false, "Run all tasks once and exit without watching for file changes")
 	flag.Parse()
 
-	fmt.Println("Asynk is starting...")
+	fmt.Println("github.com/anton7r/asynk is starting...")
 
 	configuration, err := config.LoadFromYAML()
 
@@ -49,6 +50,6 @@ func main() {
 		log.Info("Interrupt signal received . Stopping all running tasks...")
 		runner.Stop()
 
-		log.Info("Asynk exited gracefully. All running tasks stopped.")
+		log.Info("github.com/anton7r/asynk exited gracefully. All running tasks stopped.")
 	}
 }

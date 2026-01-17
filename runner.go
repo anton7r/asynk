@@ -1,15 +1,16 @@
 package main
 
 import (
-	"asynk/cmdwrap"
-	"asynk/config"
-	"asynk/files"
-	"asynk/task"
-	"asynk/util"
-	"asynk/watcher"
 	"os"
 	"sync"
 	"time"
+
+	"github.com/anton7r/asynk/cmdwrap"
+	"github.com/anton7r/asynk/config"
+	"github.com/anton7r/asynk/files"
+	"github.com/anton7r/asynk/task"
+	"github.com/anton7r/asynk/util"
+	"github.com/anton7r/asynk/watcher"
 
 	"github.com/joho/godotenv"
 	"go.uber.org/zap"

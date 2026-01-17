@@ -1,11 +1,12 @@
 package watcher
 
 import (
-	"asynk/config"
-	"asynk/config/util"
 	"os"
 	"path"
 	"path/filepath"
+
+	"github.com/anton7r/asynk/config"
+	"github.com/anton7r/asynk/config/util"
 
 	"go.uber.org/zap"
 )

@@ -1,13 +1,14 @@
 package task
 
 import (
-	"asynk/cmdwrap"
-	"asynk/config"
-	"asynk/util"
-	envUtil "asynk/util/interpolation/env"
-	"asynk/util/interpolation/idgen"
 	"context"
 	"time"
+
+	"github.com/anton7r/asynk/cmdwrap"
+	"github.com/anton7r/asynk/config"
+	"github.com/anton7r/asynk/util"
+	envUtil "github.com/anton7r/asynk/util/interpolation/env"
+	"github.com/anton7r/asynk/util/interpolation/idgen"
 
 	"go.uber.org/zap"
 )

@@ -1,9 +1,10 @@
 package idgen
 
 import (
-	"asynk/util/random"
 	"regexp"
 	"strings"
+
+	"github.com/anton7r/asynk/util/random"
 )
 
 var genIdPattern = regexp.MustCompile(`@{([^}]+)}`)

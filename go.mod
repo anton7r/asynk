@@ -1,4 +1,4 @@
-module asynk
+module github.com/anton7r/asynk
 
 go 1.24.2
 

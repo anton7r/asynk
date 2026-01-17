@@ -1,9 +1,10 @@
 package newestfile
 
 import (
-	"asynk/files"
 	"regexp"
 	"strings"
+
+	"github.com/anton7r/asynk/files"
 )
 
 var newestFilePattern = regexp.MustCompile(`~{([^}]+)}`)

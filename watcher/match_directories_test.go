@@ -1,13 +1,14 @@
 package watcher
 
 import (
-	"asynk/config"
-	"asynk/config/util"
 	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/anton7r/asynk/config"
+	"github.com/anton7r/asynk/config/util"
 
 	"github.com/stretchr/testify/assert"
 	"go.uber.org/zap"

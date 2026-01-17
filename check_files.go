@@ -1,12 +1,13 @@
 package main
 
 import (
-	"asynk/config"
-	"asynk/config/util"
-	"asynk/files"
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/anton7r/asynk/config"
+	"github.com/anton7r/asynk/config/util"
+	"github.com/anton7r/asynk/files"
 )
 
 func walker(

@@ -6,7 +6,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"asynk/config/util"
+	"github.com/anton7r/asynk/config/util"
 )
 
 type TaskType string
