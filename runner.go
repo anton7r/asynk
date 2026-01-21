@@ -377,11 +377,15 @@ func (runner *Runner) startScheduledTasks() {
 					runner.RunningTaskMutex.Unlock()
 				}
 				// Start a new instance
-				task := runner.startTaskAsync(scheduledTask)
-				runner.onTaskStart(task)
+				newTask := runner.startTaskAsync(scheduledTask)
+				if newTask != nil {
+					runner.onTaskStart(newTask)
+				}
 			} else {
-				task := runner.startTaskAsync(scheduledTask)
-				runner.onTaskStart(task)
+				newTask := runner.startTaskAsync(scheduledTask)
+				if newTask != nil {
+					runner.onTaskStart(newTask)
+				}
 			}
 		}
 	}
@@ -440,7 +444,7 @@ func (runner *Runner) canStartTask(scheduledTask *ScheduledTask) bool {
 func (r *Runner) startTaskAsync(
 	scheduledTask *ScheduledTask,
 ) *task.RunningTask {
-	task := task.NewRunningTask(
+	runningTask := task.NewRunningTask(
 		scheduledTask.TaskConfiguration,
 		r.log,
 		r.wrapLogger,
@@ -448,9 +452,18 @@ func (r *Runner) startTaskAsync(
 		r.onTaskFinished,
 	)
 
+	// NewRunningTask can return nil if no command is found for the task
+	if runningTask == nil {
+		r.log.Warn("Failed to create running task, no command found",
+			zap.String("taskId", scheduledTask.TaskConfiguration.Identifier))
+		// Notify that the task has finished (with error) to clean up scheduling state
+		r.onTaskFinished(scheduledTask.TaskConfiguration.Identifier, true)
+		return nil
+	}
+
 	// Start the task in a new goroutine to avoid blocking the main thread
-	go task.Start()
-	return task
+	go runningTask.Start()
+	return runningTask
 }
 
 // WaitForCompletion blocks until all tasks have completed in single-run mode
