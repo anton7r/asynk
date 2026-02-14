@@ -42,6 +42,9 @@ func parseCommand(command string, taskId string, log *zap.Logger) *CommandWrappe
 		cmd = exec.Command(commandParts[0])
 	}
 
+	// Place the process in its own process group so we can kill the entire tree
+	setupProcessGroup(cmd)
+
 	return &CommandWrapper{
 		cmd:    cmd,
 		taskId: taskId,
@@ -78,12 +81,7 @@ func (cmdWrap *CommandWrapper) Run(ctx context.Context, env []string, logWrap *W
 }
 
 func (cmdWrap *CommandWrapper) Cancel() error {
-	if cmdWrap.cmd == nil || cmdWrap.cmd.Process == nil {
-		return nil
-	}
-
-	// Kill the process and its subprocesses
-	return cmdWrap.cmd.Process.Kill()
+	return cancelProcess(cmdWrap.cmd)
 }
 
 func (cmdWrap *CommandWrapper) setupPipes() error {

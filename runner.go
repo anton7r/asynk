@@ -102,8 +102,15 @@ func (runner *Runner) Stop() {
 }
 
 func (runner *Runner) stopRunningTasks() {
+	// First, signal all running tasks to stop
 	for _, runningTask := range runner.RunningTasks {
 		runningTask.StopGracefully()
+	}
+
+	// Then, wait for all tasks to actually exit.
+	// This ensures processes are fully reaped before we return.
+	for _, runningTask := range runner.RunningTasks {
+		runningTask.Wait()
 	}
 }
 

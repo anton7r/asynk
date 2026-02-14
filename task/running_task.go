@@ -27,6 +27,9 @@ type RunningTask struct {
 	wrapLogger     *cmdwrap.WrapLogger
 	onTaskFinished TaskCompletionCallback
 	startTime      time.Time
+	// done is closed when the task's Start() method returns,
+	// meaning all processes have actually exited (not just signalled).
+	done chan struct{}
 }
 
 func initializeContext() (context.Context, context.CancelFunc) {
@@ -70,6 +73,7 @@ func NewRunningTask(
 		wrapLogger:     wrapLogger,
 		onTaskFinished: onTaskFinished,
 		startTime:      time.Now(),
+		done:           make(chan struct{}),
 	}
 
 	return runningTask
@@ -111,6 +115,8 @@ func getCommands(
 }
 
 func (r *RunningTask) Start() {
+	defer close(r.done)
+
 	taskId := r.TaskId()
 	r.log.Info("Starting task", zap.String("taskId", taskId))
 
@@ -148,12 +154,14 @@ func (r *RunningTask) Wait() {
 		return
 	}
 
-	if r.ctx == nil {
-		r.log.Error("Context is nil, cannot wait for task completion")
+	if r.done == nil {
+		r.log.Error("Done channel is nil, cannot wait for task completion")
 		return
 	}
 
-	<-r.ctx.Done()
+	// Block until Start() has fully returned, meaning all processes
+	// have actually exited (been reaped), not just been signalled.
+	<-r.done
 }
 
 func (r RunningTask) TaskId() string {
