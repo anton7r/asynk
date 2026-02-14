@@ -45,12 +45,29 @@ func NewRunningTask(
 	wrapLogger *cmdwrap.WrapLogger,
 	globalEnv map[string]string,
 	onTaskFinished TaskCompletionCallback,
+	platform *util.Platform,
 ) *RunningTask {
+	return NewRunningTaskWithFactory(taskConfig, log, wrapLogger, globalEnv, onTaskFinished, platform, cmdwrap.NewDefaultCommandFactory(cmdwrap.DefaultProcessManager()))
+}
+
+func NewRunningTaskWithFactory(
+	taskConfig *config.TaskConfig,
+	log *zap.Logger,
+	wrapLogger *cmdwrap.WrapLogger,
+	globalEnv map[string]string,
+	onTaskFinished TaskCompletionCallback,
+	platform *util.Platform,
+	cmdFactory cmdwrap.CommandFactory,
+) *RunningTask {
+	if cmdFactory == nil {
+		cmdFactory = cmdwrap.NewDefaultCommandFactory(cmdwrap.DefaultProcessManager())
+	}
+
 	localEnv := envUtil.InterpolateEnvVariablesList(taskConfig.Env, globalEnv)
 	taskId := taskConfig.Identifier
 	genId := idgen.NewGenIDInterpolator()
 
-	run := getCommands(taskConfig, log)
+	run := getCommands(taskConfig, log, platform)
 
 	log.Debug("Initializing task", zap.String("taskId", taskId))
 	if util.Empty(run) {
@@ -59,7 +76,7 @@ func NewRunningTask(
 	}
 
 	// This operation could as well be done later on when executing the command
-	cmds := cmdwrap.ParseAllCommands(run, taskId, log, globalEnv, genId)
+	cmds := cmdFactory.ParseAllCommands(run, taskId, log, globalEnv, genId)
 
 	ctx, cancel := initializeContext()
 
@@ -93,16 +110,21 @@ func RemoveRunningTask(runningTasks []*RunningTask, taskIdentifier string) []*Ru
 func getCommands(
 	tConfig *config.TaskConfig,
 	log *zap.Logger,
+	platform *util.Platform,
 ) []string {
+	if platform == nil {
+		platform = util.NewPlatform()
+	}
+
 	taskId := tConfig.Identifier
 
 	var run []string
 
-	if util.IsWindows() && !util.Empty(tConfig.RunWindows) {
+	if platform.IsWindows() && !util.Empty(tConfig.RunWindows) {
 		run = tConfig.RunWindows
-	} else if util.IsLinux() && !util.Empty(tConfig.RunLinux) {
+	} else if platform.IsLinux() && !util.Empty(tConfig.RunLinux) {
 		run = tConfig.RunLinux
-	} else if util.IsMac() && !util.Empty(tConfig.RunMac) {
+	} else if platform.IsMac() && !util.Empty(tConfig.RunMac) {
 		run = tConfig.RunMac
 	} else if !util.Empty(tConfig.Run) {
 		run = tConfig.Run

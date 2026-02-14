@@ -4,9 +4,11 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strings"
 
 	"github.com/anton7r/asynk/config"
 	"github.com/anton7r/asynk/config/util"
+	asynkutil "github.com/anton7r/asynk/util"
 
 	"go.uber.org/zap"
 )
@@ -35,6 +37,10 @@ func newWatchableDirectoryMatcher(
 		}
 
 		pathStr = filepath.ToSlash(pathStr)
+		// Also handle backslashes that filepath.ToSlash won't convert on Linux
+		// (filepath.ToSlash is a no-op on non-Windows platforms, but we may
+		// receive Windows-style paths in cross-platform scenarios)
+		pathStr = strings.ReplaceAll(pathStr, "\\", "/")
 
 		// Skip directories that are globally excluded
 		isDir := info.IsDir()
@@ -50,13 +56,13 @@ func newWatchableDirectoryMatcher(
 
 		// If we have matching tasks, update the watchable directories
 		if len(matchedTasks) > 0 {
-			logger.Debug("Path not matched",
+			logger.Debug("Path matched",
 				zap.String("path", pathStr),
 				zap.String("dirPath", dirPath))
 
 			updateWatchableDirectory(watchable, dirPath, matchedTasks)
 		} else {
-			logger.Debug("Path matched",
+			logger.Debug("Path not matched",
 				zap.String("path", pathStr),
 				zap.String("dirPath", dirPath))
 		}
@@ -132,10 +138,24 @@ func MatchWatchableDirectories(
 	globallyExcluded util.GlobArray,
 	taskConfigs TaskConfigMap,
 ) *WatchableDirectories {
+	return MatchWatchableDirectoriesWithFS(log, globallyExcluded, taskConfigs, asynkutil.NewOSFileSystem())
+}
+
+func MatchWatchableDirectoriesWithFS(
+	log *zap.Logger,
+	globallyExcluded util.GlobArray,
+	taskConfigs TaskConfigMap,
+	fs asynkutil.FileSystem,
+) *WatchableDirectories {
+	if fs == nil {
+		fs = asynkutil.NewOSFileSystem()
+	}
 	watchable := &WatchableDirectories{directories: make(map[string]WatchableDirectory)}
 
 	// List all items in the directory - assume current directory
-	filepath.Walk("./", newWatchableDirectoryMatcher(watchable, globallyExcluded, taskConfigs, log))
+	if err := fs.Walk("./", newWatchableDirectoryMatcher(watchable, globallyExcluded, taskConfigs, log)); err != nil {
+		log.Error("Failed to walk filesystem for watchable directories", zap.Error(err))
+	}
 
 	log.Info("Matched watchable directories",
 		zap.Int("matched_directories", len(watchable.directories)),

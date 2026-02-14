@@ -8,6 +8,7 @@ import (
 	"syscall"
 
 	"github.com/anton7r/asynk/config"
+	"github.com/anton7r/asynk/util"
 )
 
 func main() {
@@ -32,7 +33,8 @@ func main() {
 	log := createLogger(logLevel)
 
 	// Create a new application state
-	runner := NewRunner(configuration, log, *runOnce)
+	platform := util.NewPlatform()
+	runner := NewRunner(configuration, log, *runOnce, platform)
 
 	if *runOnce {
 		log.Info("Running in single-run mode (no file watching)")
