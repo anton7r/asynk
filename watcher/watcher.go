@@ -1,22 +1,24 @@
 package watcher
 
 import (
-	"os"
 	"path"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/anton7r/asynk/util"
 	"github.com/fsnotify/fsnotify"
 	"go.uber.org/zap"
 )
 
 type Watcher struct {
 	directories          *WatchableDirectories
-	watcher              *fsnotify.Watcher
+	watcher              FsWatcher
 	log                  *zap.Logger
 	aggregator           *FileEventAggregator
 	propagateChangeEvent func(events map[string]AggregatedEvent)
+	fs                   util.FileSystem
 }
 
 type UpdatedFile struct {
@@ -46,16 +48,36 @@ func NewWatcher(
 	watchedDirectories *WatchableDirectories,
 	propagateChangeEvent func(events map[string]AggregatedEvent),
 ) (*Watcher, error) {
-	watcher, err := fsnotify.NewWatcher()
-	if err != nil {
-		return nil, err
+	return NewWatcherWithDeps(log, watchedDirectories, propagateChangeEvent, util.NewOSFileSystem(), nil)
+}
+
+// NewWatcherWithDeps creates a Watcher with injected dependencies for testing.
+// If fsWatcher is nil, a real fsnotify watcher will be created.
+func NewWatcherWithDeps(
+	log *zap.Logger,
+	watchedDirectories *WatchableDirectories,
+	propagateChangeEvent func(events map[string]AggregatedEvent),
+	fs util.FileSystem,
+	fsWatcher FsWatcher,
+) (*Watcher, error) {
+	if fsWatcher == nil {
+		var err error
+		fsWatcher, err = NewRealFsWatcher()
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	if fs == nil {
+		fs = util.NewOSFileSystem()
 	}
 
 	w := &Watcher{
-		watcher:              watcher,
+		watcher:              fsWatcher,
 		log:                  log,
 		directories:          watchedDirectories,
 		propagateChangeEvent: propagateChangeEvent,
+		fs:                   fs,
 		aggregator: &FileEventAggregator{
 			aggregated:     make(map[string]AggregatedEvent),
 			aggregatorLock: sync.Mutex{},
@@ -95,14 +117,14 @@ func (w *Watcher) watchDirs() {
 func (w *Watcher) initFsEventWatcher() {
 	for {
 		select {
-		case event, ok := <-w.watcher.Events:
+		case event, ok := <-w.watcher.Events():
 			if !ok {
 				return
 			}
 
 			w.handleFsEvent(event)
 
-		case err, ok := <-w.watcher.Errors:
+		case err, ok := <-w.watcher.Errors():
 			if !ok {
 				return
 			}
@@ -113,6 +135,10 @@ func (w *Watcher) initFsEventWatcher() {
 
 func (w *Watcher) handleFsEvent(event fsnotify.Event) {
 	changePath := filepath.ToSlash(event.Name)
+	// Also handle backslashes that filepath.ToSlash won't convert on Linux
+	// (filepath.ToSlash is a no-op on non-Windows platforms, but we may
+	// receive Windows-style paths in cross-platform scenarios)
+	changePath = strings.ReplaceAll(changePath, "\\", "/")
 
 	w.log.Info("File changes",
 		zap.String("eventType", event.Op.String()),
@@ -122,28 +148,14 @@ func (w *Watcher) handleFsEvent(event fsnotify.Event) {
 	var dirPath string
 	var isDir bool
 	var modifiedTime time.Time
-	//var isRemove bool
 
 	if event.Op&fsnotify.Remove == fsnotify.Remove {
-		// TODO: Implement this properly
-		// We need to update the file watching configuration
-		// to allow separation of file event types.
-		// So that file deletion would not be treated as a modification
-		// in cases where modifications and etc are actually the desired
-		// events.
-
-		//isRemove = true
-		// We can only do best approximation here, since the file is now deleted
-		// or we could perhaps cache it in memory.
-		//isDir = !strings.Contains(path.Base(changePath), ".")
-		//if isDir {
-		//	dirPath = changePath
-		//} else {
-		//	dirPath = path.Dir(changePath)
-		//}
-
+		// For removed files, we can't stat them. Use path.Dir as best approximation.
+		dirPath = path.Dir(changePath)
+		isDir = false
+		modifiedTime = time.Now()
 	} else {
-		stat, err := os.Lstat(changePath)
+		stat, err := w.fs.Lstat(changePath)
 		if err != nil {
 			w.log.Error("Error getting file info", zap.Error(err))
 			return
@@ -210,7 +222,6 @@ func (w *Watcher) checkIfWeNeedToNotify(
 }
 
 // If the changeId matches the current changeId, we propagate the events.
-// TODO: This is a bit of a hack. The propagation should be delayed to avoid spamming the system.
 func (w *Watcher) propagateEvents(delay time.Duration, changeId int8) {
 	time.Sleep(delay)
 	w.aggregator.aggregatorLock.Lock()

@@ -2,11 +2,11 @@ package config
 
 import (
 	"fmt"
-	"os"
 
 	"gopkg.in/yaml.v3"
 
 	"github.com/anton7r/asynk/config/util"
+	asynkutil "github.com/anton7r/asynk/util"
 )
 
 type TaskType string
@@ -70,15 +70,31 @@ type Config struct {
 }
 
 func LoadFromYAML() (*Config, error) {
-	return loadConfigFromYAML("./asynk.yaml")
+	return LoadFromYAMLWithFS(asynkutil.NewOSFileSystem())
 }
 
-func loadConfigFromYAML(filePath string) (*Config, error) {
-	data, err := os.ReadFile(filePath)
+func LoadFromYAMLWithFS(fs asynkutil.FileSystem) (*Config, error) {
+	if fs == nil {
+		fs = asynkutil.NewOSFileSystem()
+	}
+	return loadConfigFromYAML("./asynk.yaml", fs)
+}
+
+func loadConfigFromYAML(filePath string, fs asynkutil.FileSystem) (*Config, error) {
+	if fs == nil {
+		fs = asynkutil.NewOSFileSystem()
+	}
+	data, err := fs.ReadFile(filePath)
 	if err != nil {
 		return nil, fmt.Errorf("error reading YAML file: %w", err)
 	}
 
+	return LoadFromBytes(data)
+}
+
+// LoadFromBytes parses config from raw YAML bytes. Useful for testing
+// without needing a real file system.
+func LoadFromBytes(data []byte) (*Config, error) {
 	config := &Config{
 		Shared: SharedConfig{
 			Exclude:  util.NewGlobArray(),
@@ -87,7 +103,7 @@ func loadConfigFromYAML(filePath string) (*Config, error) {
 		Tasks: make(map[string]*TaskConfig),
 	}
 
-	err = yaml.Unmarshal(data, config)
+	err := yaml.Unmarshal(data, config)
 	if err != nil {
 		return nil, fmt.Errorf("error unmarshalling YAML data: %w", err)
 	}
@@ -104,6 +120,10 @@ func loadConfigFromYAML(filePath string) (*Config, error) {
 
 func fillTaskIds(config *Config) {
 	for taskId, taskConfig := range config.Tasks {
+		taskConfig.Identifier = taskId
+	}
+
+	for taskId, taskConfig := range config.CleanUpTasks {
 		taskConfig.Identifier = taskId
 	}
 }

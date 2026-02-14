@@ -23,9 +23,10 @@ type CommandWrapper struct {
 	log         *zap.Logger
 	readCloser  io.ReadCloser
 	writeCloser io.WriteCloser
+	procMgr     ProcessManager
 }
 
-func parseCommand(command string, taskId string, log *zap.Logger) *CommandWrapper {
+func parseCommand(command string, taskId string, log *zap.Logger, procMgr ProcessManager) *CommandWrapper {
 	// Split the command with its arguments
 	commandParts := strings.Split(command, " ")
 
@@ -43,12 +44,13 @@ func parseCommand(command string, taskId string, log *zap.Logger) *CommandWrappe
 	}
 
 	// Place the process in its own process group so we can kill the entire tree
-	setupProcessGroup(cmd)
+	procMgr.SetupProcessGroup(cmd)
 
 	return &CommandWrapper{
-		cmd:    cmd,
-		taskId: taskId,
-		log:    log,
+		cmd:     cmd,
+		taskId:  taskId,
+		log:     log,
+		procMgr: procMgr,
 	}
 }
 
@@ -81,7 +83,7 @@ func (cmdWrap *CommandWrapper) Run(ctx context.Context, env []string, logWrap *W
 }
 
 func (cmdWrap *CommandWrapper) Cancel() error {
-	return cancelProcess(cmdWrap.cmd)
+	return cmdWrap.procMgr.CancelProcess(cmdWrap.cmd)
 }
 
 func (cmdWrap *CommandWrapper) setupPipes() error {
@@ -150,6 +152,21 @@ func ParseAllCommands(
 	env map[string]string,
 	genIdInterpolator *idgen.GenIDInterpolator,
 ) []*CommandWrapper {
+	return ParseAllCommandsWithProcessManager(commands, taskId, log, env, genIdInterpolator, DefaultProcessManager())
+}
+
+func ParseAllCommandsWithProcessManager(
+	commands []string,
+	taskId string,
+	log *zap.Logger,
+	env map[string]string,
+	genIdInterpolator *idgen.GenIDInterpolator,
+	procMgr ProcessManager,
+) []*CommandWrapper {
+	if procMgr == nil {
+		procMgr = DefaultProcessManager()
+	}
+
 	cmds := []*CommandWrapper{}
 
 	for i, command := range commands {
@@ -163,7 +180,7 @@ func ParseAllCommands(
 		}
 		interpolatedCommand = newestfile.Interpolate(interpolatedCommand)
 
-		cmdWrap := parseCommand(interpolatedCommand, taskId, log)
+		cmdWrap := parseCommand(interpolatedCommand, taskId, log, procMgr)
 		if cmdWrap != nil {
 			cmds = append(cmds, cmdWrap)
 		} else {

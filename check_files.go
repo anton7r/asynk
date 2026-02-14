@@ -8,6 +8,7 @@ import (
 	"github.com/anton7r/asynk/config"
 	"github.com/anton7r/asynk/config/util"
 	"github.com/anton7r/asynk/files"
+	asynkutil "github.com/anton7r/asynk/util"
 )
 
 func walker(
@@ -46,6 +47,18 @@ func GetMatchedFiles(
 	cleanUpTask *config.CleanUpTaskConfig,
 	globallyExcluded util.GlobArray,
 ) ([]files.MatchedFile, error) {
+	return GetMatchedFilesWithFS(cleanUpTask, globallyExcluded, asynkutil.NewOSFileSystem())
+}
+
+func GetMatchedFilesWithFS(
+	cleanUpTask *config.CleanUpTaskConfig,
+	globallyExcluded util.GlobArray,
+	fs asynkutil.FileSystem,
+) ([]files.MatchedFile, error) {
+	if fs == nil {
+		fs = asynkutil.NewOSFileSystem()
+	}
+
 	var matched = make([]files.MatchedFile, 0)
 
 	addMatch := func(path string, modTime time.Time) {
@@ -53,7 +66,7 @@ func GetMatchedFiles(
 			files.MatchedFile{Path: path, ModTime: modTime})
 	}
 
-	err := filepath.Walk(".", walker(addMatch, cleanUpTask, globallyExcluded))
+	err := fs.Walk(".", walker(addMatch, cleanUpTask, globallyExcluded))
 	if err != nil {
 		return nil, err
 	}

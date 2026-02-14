@@ -1,7 +1,6 @@
 package main
 
 import (
-	"os"
 	"sync"
 	"time"
 
@@ -39,19 +38,57 @@ type Runner struct {
 	wrapLogger         *cmdwrap.WrapLogger
 	watch              *watcher.Watcher
 	env                map[string]string
+	deps               RunnerDeps
 	runOnce            bool
 	completionChan     chan struct{}
 }
 
-func NewRunner(configuration *config.Config, log *zap.Logger, runOnce bool) *Runner {
+// RunnerDeps holds all injectable infrastructure dependencies for the Runner.
+// Use DefaultRunnerDeps() for production; provide custom implementations for testing.
+type RunnerDeps struct {
+	Platform   *util.Platform
+	FS         util.FileSystem
+	CmdFactory cmdwrap.CommandFactory
+}
+
+// DefaultRunnerDeps returns production infrastructure dependencies.
+func DefaultRunnerDeps() RunnerDeps {
+	return RunnerDeps{
+		Platform:   util.NewPlatform(),
+		FS:         util.NewOSFileSystem(),
+		CmdFactory: cmdwrap.NewDefaultCommandFactory(cmdwrap.DefaultProcessManager()),
+	}
+}
+
+func NewRunner(configuration *config.Config, log *zap.Logger, runOnce bool, platform *util.Platform) *Runner {
+	deps := RunnerDeps{
+		Platform:   platform,
+		FS:         util.NewOSFileSystem(),
+		CmdFactory: cmdwrap.NewDefaultCommandFactory(cmdwrap.DefaultProcessManager()),
+	}
+	return NewRunnerWithDeps(configuration, log, runOnce, deps)
+}
+
+func NewRunnerWithDeps(configuration *config.Config, log *zap.Logger, runOnce bool, deps RunnerDeps) *Runner {
+	if deps.Platform == nil {
+		deps.Platform = util.NewPlatform()
+	}
+	if deps.FS == nil {
+		deps.FS = util.NewOSFileSystem()
+	}
+	if deps.CmdFactory == nil {
+		deps.CmdFactory = cmdwrap.NewDefaultCommandFactory(cmdwrap.DefaultProcessManager())
+	}
+
 	runner := &Runner{
 		Config:         configuration,
 		ScheduledTasks: make(map[string]*ScheduledTask, 0),
 		RunningTasks:   make([]*task.RunningTask, 0),
 		log:            log,
 		env:            make(map[string]string),
+		deps:           deps,
 		runOnce:        runOnce,
-		completionChan: make(chan struct{}),
+		completionChan: make(chan struct{}, 1),
 	}
 
 	taskIds := make([]string, 0, len(configuration.Tasks))
@@ -61,9 +98,9 @@ func NewRunner(configuration *config.Config, log *zap.Logger, runOnce bool) *Run
 
 	// Only initialize watcher if not in single-run mode
 	if !runOnce {
-		watchableDirectories := watcher.MatchWatchableDirectories(log, configuration.Shared.Exclude, configuration.Tasks)
+		watchableDirectories := watcher.MatchWatchableDirectoriesWithFS(log, configuration.Shared.Exclude, configuration.Tasks, deps.FS)
 		var err error
-		runner.watch, err = watcher.NewWatcher(log, watchableDirectories, runner.onFileChange)
+		runner.watch, err = watcher.NewWatcherWithDeps(log, watchableDirectories, runner.onFileChange, deps.FS, nil)
 		if err != nil {
 			log.Error("Error creating watcher", zap.Error(err))
 		}
@@ -303,7 +340,7 @@ func (runner *Runner) startCleanUp() {
 	for _, cleanUpTask := range runner.Config.CleanUpTasks {
 		runner.log.Debug("Starting cleanup task", zap.String("cleanUpTaskId", cleanUpTask.Identifier))
 
-		matchedFiles, err := GetMatchedFiles(cleanUpTask, runner.Config.Shared.Exclude)
+		matchedFiles, err := GetMatchedFilesWithFS(cleanUpTask, runner.Config.Shared.Exclude, runner.deps.FS)
 		if err != nil {
 			runner.log.Error("Error getting deletable files", zap.Error(err))
 			continue
@@ -328,7 +365,7 @@ func (runner *Runner) startCleanUp() {
 				zap.String("cleanUpTaskId", cleanUpTask.Identifier),
 			)
 
-			err := os.Remove(file.Path)
+			err := runner.deps.FS.Remove(file.Path)
 			if err != nil {
 				runner.log.Info("Could not delete file",
 					zap.String("file", file.Path),
@@ -451,12 +488,14 @@ func (runner *Runner) canStartTask(scheduledTask *ScheduledTask) bool {
 func (r *Runner) startTaskAsync(
 	scheduledTask *ScheduledTask,
 ) *task.RunningTask {
-	runningTask := task.NewRunningTask(
+	runningTask := task.NewRunningTaskWithFactory(
 		scheduledTask.TaskConfiguration,
 		r.log,
 		r.wrapLogger,
 		r.env,
 		r.onTaskFinished,
+		r.deps.Platform,
+		r.deps.CmdFactory,
 	)
 
 	// NewRunningTask can return nil if no command is found for the task
