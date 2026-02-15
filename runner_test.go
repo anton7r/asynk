@@ -659,6 +659,155 @@ func TestFilterRunningTasks_EmptyInput(t *testing.T) {
 	assert.Empty(t, result)
 }
 
+// Test for the race condition fix: when a task has been started (recordTaskStartTime
+// called) but the RunningTask goroutine hasn't added it to RunningTasks yet,
+// filterRunningTasks should still skip it if the start time is after the
+// modification time. This is the core bug: debounced file events from a build
+// task's output (e.g., Go compiler writing to tmp/bin/) would sneak through
+// filterRunningTasks and schedule a duplicate restart of the dependent
+// continuous task.
+func TestFilterRunningTasks_SkipsRecentlyStartedTask_NotYetInRunningTasks(t *testing.T) {
+	cfg := testConfig(t)
+	runner, _ := testRunnerWithDeps(t, cfg)
+
+	serverTask := cfg.Tasks["server"]
+
+	// Simulate: the server task was just started via dependency chain.
+	// recordTaskStartTime was called, but the RunningTask hasn't been
+	// added to RunningTasks yet (goroutine is still launching).
+	runner.recordTaskStartTime("server")
+
+	// The file modification time is BEFORE the task start time (it was
+	// the build output that triggered the original dependency chain).
+	oldModTime := time.Now().Add(-1 * time.Second)
+	schedulable := map[string]*SchedulableTask{
+		"server": {
+			TaskConfiguration: serverTask,
+			ModificationTime:  oldModTime,
+		},
+	}
+
+	// Crucially, "server" is NOT in RunningTasks — simulating the race window.
+	assert.Empty(t, runner.RunningTasks)
+
+	result := runner.filterRunningTasks(schedulable)
+	assert.Empty(t, result,
+		"task should be filtered out via lastTaskStartTimes even when not yet in RunningTasks")
+}
+
+func TestFilterRunningTasks_KeepsTask_WhenModificationIsNewerThanLastStartTime(t *testing.T) {
+	cfg := testConfig(t)
+	runner, _ := testRunnerWithDeps(t, cfg)
+
+	serverTask := cfg.Tasks["server"]
+
+	// Simulate: the server was started a while ago.
+	runner.RunningTaskMutex.Lock()
+	runner.lastTaskStartTimes["server"] = time.Now().Add(-1 * time.Hour)
+	runner.RunningTaskMutex.Unlock()
+
+	// A NEW file change happened AFTER the recorded start time.
+	futureModTime := time.Now().Add(1 * time.Second)
+	schedulable := map[string]*SchedulableTask{
+		"server": {
+			TaskConfiguration: serverTask,
+			ModificationTime:  futureModTime,
+		},
+	}
+
+	result := runner.filterRunningTasks(schedulable)
+	assert.Len(t, result, 1,
+		"task should NOT be filtered out when modification is newer than last start time")
+	assert.Contains(t, result, "server")
+}
+
+func TestFilterRunningTasks_RaceCondition_DependencyChainScenario(t *testing.T) {
+	// Full scenario: go build → backend (continuous).
+	// The go build task writes to tmp/bin/. Those file events are debounced
+	// and arrive at onFileChange. Meanwhile, the go task finishes,
+	// triggering startScheduledTasks which starts backend. But the
+	// debounced events also hit filterRunningTasks. Without the fix,
+	// filterRunningTasks misses backend because it hasn't been added to
+	// RunningTasks yet.
+	yml := []byte(`
+tasks:
+  go:
+    type: build
+    run: "go build -o tmp/bin/app ."
+    include:
+      - "**/*.go"
+  backend:
+    type: continuous
+    run: "./tmp/bin/app"
+    include:
+      - "tmp/bin/**"
+    exclude:
+      - "*-go-tmp-*"
+    dependencies:
+      - go
+`)
+	cfg, err := config.LoadFromBytes(yml)
+	assert.NoError(t, err)
+
+	runner, _ := testRunnerWithDeps(t, cfg)
+
+	// Step 1: backend was just started via dependency chain (go finished →
+	// startScheduledTasks → recordTaskStartTime("backend") → startTaskAsync).
+	runner.recordTaskStartTime("backend")
+
+	// Step 2: Debounced file events from the go build arrive.
+	// The binary file modification happened BEFORE the backend was started.
+	buildOutputModTime := time.Now().Add(-500 * time.Millisecond)
+	schedulable := map[string]*SchedulableTask{
+		"backend": {
+			TaskConfiguration: cfg.Tasks["backend"],
+			ModificationTime:  buildOutputModTime,
+		},
+	}
+
+	// backend is NOT yet in RunningTasks — this is the race window.
+	result := runner.filterRunningTasks(schedulable)
+	assert.Empty(t, result,
+		"backend should be filtered out — it was just started via dependency chain, "+
+			"even though the RunningTask hasn't been added to RunningTasks yet")
+}
+
+func TestRecordTaskStartTime_SetsTime(t *testing.T) {
+	cfg := testConfig(t)
+	runner, _ := testRunnerWithDeps(t, cfg)
+
+	before := time.Now()
+	runner.recordTaskStartTime("build")
+	after := time.Now()
+
+	runner.RunningTaskMutex.Lock()
+	recorded := runner.lastTaskStartTimes["build"]
+	runner.RunningTaskMutex.Unlock()
+
+	assert.False(t, recorded.Before(before), "recorded time should be >= before")
+	assert.False(t, recorded.After(after), "recorded time should be <= after")
+}
+
+func TestRecordTaskStartTime_OverwritesPreviousTime(t *testing.T) {
+	cfg := testConfig(t)
+	runner, _ := testRunnerWithDeps(t, cfg)
+
+	// Set an old time
+	runner.RunningTaskMutex.Lock()
+	runner.lastTaskStartTimes["build"] = time.Now().Add(-1 * time.Hour)
+	runner.RunningTaskMutex.Unlock()
+
+	// Record a new time
+	runner.recordTaskStartTime("build")
+
+	runner.RunningTaskMutex.Lock()
+	recorded := runner.lastTaskStartTimes["build"]
+	runner.RunningTaskMutex.Unlock()
+
+	assert.True(t, recorded.After(time.Now().Add(-1*time.Second)),
+		"recorded time should be recent, not the old time")
+}
+
 // ============================================================
 // Tests for scheduleTasksFromMap
 // ============================================================

@@ -34,6 +34,12 @@ type Runner struct {
 	ScheduledTaskMutex sync.Mutex
 	RunningTasks       []*task.RunningTask
 	RunningTaskMutex   sync.Mutex
+	// lastTaskStartTimes records when startTaskAsync was called for each task.
+	// This is set synchronously in startScheduledTasks BEFORE the goroutine
+	// launches, closing the race window where filterRunningTasks could miss
+	// a task that was just started but not yet added to RunningTasks.
+	// Protected by RunningTaskMutex.
+	lastTaskStartTimes map[string]time.Time
 	log                *zap.Logger
 	wrapLogger         *cmdwrap.WrapLogger
 	watch              *watcher.Watcher
@@ -81,14 +87,15 @@ func NewRunnerWithDeps(configuration *config.Config, log *zap.Logger, runOnce bo
 	}
 
 	runner := &Runner{
-		Config:         configuration,
-		ScheduledTasks: make(map[string]*ScheduledTask, 0),
-		RunningTasks:   make([]*task.RunningTask, 0),
-		log:            log,
-		env:            make(map[string]string),
-		deps:           deps,
-		runOnce:        runOnce,
-		completionChan: make(chan struct{}, 1),
+		Config:             configuration,
+		ScheduledTasks:     make(map[string]*ScheduledTask, 0),
+		RunningTasks:       make([]*task.RunningTask, 0),
+		lastTaskStartTimes: make(map[string]time.Time),
+		log:                log,
+		env:                make(map[string]string),
+		deps:               deps,
+		runOnce:            runOnce,
+		completionChan:     make(chan struct{}, 1),
 	}
 
 	taskIds := make([]string, 0, len(configuration.Tasks))
@@ -158,9 +165,18 @@ func (runner *Runner) filterRunningTasks(
 
 	runnerTasks := make(map[string]*SchedulableTask, 0)
 	for taskId, s := range taskConfigs {
+		// Check if the task is already in RunningTasks with a newer start time.
 		task := runner.getRunningTask(taskId)
 		if task != nil && task.StartTime().After(s.ModificationTime) {
 			runner.log.Info("Skipping task as it's already running with up to date information", zap.String("taskId", taskId))
+			continue
+		}
+
+		// Also check lastTaskStartTimes — this covers the race window where
+		// startScheduledTasks has called startTaskAsync but the RunningTask
+		// hasn't been added to RunningTasks yet (goroutine hasn't started).
+		if startTime, ok := runner.lastTaskStartTimes[taskId]; ok && startTime.After(s.ModificationTime) {
+			runner.log.Info("Skipping task as it was recently started (pending goroutine launch)", zap.String("taskId", taskId))
 			continue
 		}
 
@@ -420,12 +436,18 @@ func (runner *Runner) startScheduledTasks() {
 					runner.RunningTasks = task.RemoveRunningTask(runner.RunningTasks, taskId)
 					runner.RunningTaskMutex.Unlock()
 				}
+				// Record start time BEFORE launching the async task.
+				// This closes the race where filterRunningTasks could miss
+				// a task that was just started but not yet in RunningTasks.
+				runner.recordTaskStartTime(taskId)
 				// Start a new instance
 				newTask := runner.startTaskAsync(scheduledTask)
 				if newTask != nil {
 					runner.onTaskStart(newTask)
 				}
 			} else {
+				// Record start time BEFORE launching the async task.
+				runner.recordTaskStartTime(taskId)
 				newTask := runner.startTaskAsync(scheduledTask)
 				if newTask != nil {
 					runner.onTaskStart(newTask)
@@ -439,6 +461,17 @@ func (runner *Runner) startScheduledTasks() {
 
 func (runner *Runner) isTaskInQueue(taskIdentifier string) bool {
 	return runner.ScheduledTasks[taskIdentifier] != nil
+}
+
+// recordTaskStartTime records the current time as the start time for a task.
+// This must be called synchronously (under ScheduledTaskMutex) BEFORE
+// startTaskAsync, so that filterRunningTasks can see the start time even
+// before the RunningTask is added to RunningTasks in the goroutine.
+// Protected by RunningTaskMutex.
+func (runner *Runner) recordTaskStartTime(taskId string) {
+	runner.RunningTaskMutex.Lock()
+	runner.lastTaskStartTimes[taskId] = time.Now()
+	runner.RunningTaskMutex.Unlock()
 }
 
 func (runner *Runner) isTaskRunning(taskIdentifier string) bool {
