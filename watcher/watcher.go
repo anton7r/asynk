@@ -1,6 +1,8 @@
 package watcher
 
 import (
+	"errors"
+	"os"
 	"path"
 	"path/filepath"
 	"strings"
@@ -157,6 +159,16 @@ func (w *Watcher) handleFsEvent(event fsnotify.Event) {
 	} else {
 		stat, err := w.fs.Lstat(changePath)
 		if err != nil {
+			// If the file no longer exists, it was a transient file (e.g.,
+			// temporary files created and quickly deleted by build tools like
+			// the Go compiler). Treat this the same as a Remove event — skip
+			// it silently rather than logging an error.
+			if errors.Is(err, os.ErrNotExist) {
+				w.log.Debug("File no longer exists, skipping transient file event",
+					zap.String("filePath", changePath),
+				)
+				return
+			}
 			w.log.Error("Error getting file info", zap.Error(err))
 			return
 		}

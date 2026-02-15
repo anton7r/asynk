@@ -17,6 +17,7 @@ import (
 	"github.com/fsnotify/fsnotify"
 	"github.com/stretchr/testify/assert"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // ---------- mock FsWatcher ----------
@@ -99,7 +100,7 @@ func (m *mockFS) addDir(name string) {
 func (m *mockFS) Lstat(name string) (os.FileInfo, error) {
 	entry, ok := m.files[name]
 	if !ok {
-		return nil, fmt.Errorf("file not found: %s", name)
+		return nil, &os.PathError{Op: "lstat", Path: name, Err: os.ErrNotExist}
 	}
 	return &mockStatInfo{name: filepath.Base(name), entry: entry}, nil
 }
@@ -238,6 +239,182 @@ func TestHandleFsEvent_WriteEvent(t *testing.T) {
 	}
 
 	w.Close()
+}
+
+// =====================================================================
+// Tests: transient (temp) file handling in handleFsEvent
+// These tests reproduce the Go 1.26 compiler temp file issue where
+// temporary files are created and deleted quickly, causing Lstat to
+// fail with "no such file or directory".
+// =====================================================================
+
+func TestHandleFsEvent_TransientFile_LstatNotExist_ShouldNotError(t *testing.T) {
+	// When a file is created and quickly deleted (e.g., Go compiler temp files
+	// like "tmp/bin/adasdasderii4o4jro-go-tmp-umask"), fsnotify fires a Create
+	// event, but by the time handleFsEvent calls Lstat, the file is gone.
+	// This should NOT be logged as an error — it should be treated as a
+	// transient/removed file event and handled gracefully.
+	logger, obs := setupObservedLogger()
+	mfs := newMockFS()
+	// Do NOT add the temp file to mockFS — Lstat will return os.ErrNotExist
+
+	dirs := &WatchableDirectories{
+		directories: map[string]WatchableDirectory{
+			"tmp/bin": {
+				MatchedDirectory: "tmp/bin",
+				RelativePath:     "./tmp/bin",
+				TaskIds:          map[string]bool{"server": true},
+			},
+		},
+	}
+
+	propagateCalled := false
+	propagate := func(events map[string]AggregatedEvent) {
+		propagateCalled = true
+	}
+
+	fw := newTestFsWatcher()
+	w, err := NewWatcherWithDeps(logger, dirs, propagate, mfs, fw)
+	assert.NoError(t, err)
+
+	// Simulate a Create event for a Go compiler temp file that no longer exists
+	w.handleFsEvent(fsnotify.Event{
+		Name: "tmp/bin/adasdasderii4o4jro-go-tmp-umask",
+		Op:   fsnotify.Create,
+	})
+
+	// Give a small window for any async propagation
+	time.Sleep(300 * time.Millisecond)
+
+	// The event should NOT have been propagated (file doesn't exist, treat as removed)
+	assert.False(t, propagateCalled,
+		"propagate should not be called for a transient file that disappeared")
+
+	// Verify no ERROR level logs were emitted — the "no such file" case
+	// for a Create event should be handled gracefully (debug/info at most)
+	errorLogs := obs.FilterLevelExact(zap.ErrorLevel).All()
+	for _, entry := range errorLogs {
+		assert.NotContains(t, entry.Message, "Error getting file info",
+			"Transient file disappearance should not produce ERROR level logs")
+	}
+
+	w.Close()
+}
+
+func TestHandleFsEvent_TransientFile_WriteEvent_LstatNotExist(t *testing.T) {
+	// Similar to above, but with a Write event for a transient file.
+	// The Go compiler may write to a temp file that gets deleted before
+	// we can Lstat it.
+	logger, obs := setupObservedLogger()
+	mfs := newMockFS()
+
+	dirs := &WatchableDirectories{
+		directories: map[string]WatchableDirectory{
+			"tmp/bin": {
+				MatchedDirectory: "tmp/bin",
+				RelativePath:     "./tmp/bin",
+				TaskIds:          map[string]bool{"server": true},
+			},
+		},
+	}
+
+	propagateCalled := false
+	propagate := func(events map[string]AggregatedEvent) {
+		propagateCalled = true
+	}
+
+	fw := newTestFsWatcher()
+	w, err := NewWatcherWithDeps(logger, dirs, propagate, mfs, fw)
+	assert.NoError(t, err)
+
+	w.handleFsEvent(fsnotify.Event{
+		Name: "tmp/bin/some-temp-file-go-tmp-umask",
+		Op:   fsnotify.Write,
+	})
+
+	time.Sleep(300 * time.Millisecond)
+	assert.False(t, propagateCalled,
+		"propagate should not be called for a transient file write event")
+
+	errorLogs := obs.FilterLevelExact(zap.ErrorLevel).All()
+	for _, entry := range errorLogs {
+		assert.NotContains(t, entry.Message, "Error getting file info",
+			"Transient file disappearance should not produce ERROR level logs")
+	}
+
+	w.Close()
+}
+
+func TestHandleFsEvent_TransientFile_RealLstatError_StillLogsError(t *testing.T) {
+	// For actual Lstat errors (not os.ErrNotExist), such as permission denied,
+	// the error should still be logged at ERROR level.
+	logger, obs := setupObservedLogger()
+	mfs := &lstatErrorMockFS{
+		mockFS: newMockFS(),
+		errForPath: map[string]error{
+			"src/protected.go": fmt.Errorf("permission denied"),
+		},
+	}
+
+	dirs := &WatchableDirectories{
+		directories: map[string]WatchableDirectory{
+			"src": {
+				MatchedDirectory: "src",
+				RelativePath:     "./src",
+				TaskIds:          map[string]bool{"build": true},
+			},
+		},
+	}
+
+	propagateCalled := false
+	propagate := func(events map[string]AggregatedEvent) {
+		propagateCalled = true
+	}
+
+	fw := newTestFsWatcher()
+	w, err := NewWatcherWithDeps(logger, dirs, propagate, mfs, fw)
+	assert.NoError(t, err)
+
+	w.handleFsEvent(fsnotify.Event{
+		Name: "src/protected.go",
+		Op:   fsnotify.Write,
+	})
+
+	time.Sleep(300 * time.Millisecond)
+	assert.False(t, propagateCalled)
+
+	// For real errors (not ErrNotExist), ERROR level log IS expected
+	errorLogs := obs.FilterLevelExact(zap.ErrorLevel).All()
+	foundErrorLog := false
+	for _, entry := range errorLogs {
+		if entry.Message == "Error getting file info" {
+			foundErrorLog = true
+			break
+		}
+	}
+	assert.True(t, foundErrorLog,
+		"Real Lstat errors (not ErrNotExist) should still produce ERROR level logs")
+
+	w.Close()
+}
+
+// lstatErrorMockFS wraps mockFS but returns custom errors for specific paths on Lstat.
+type lstatErrorMockFS struct {
+	*mockFS
+	errForPath map[string]error
+}
+
+func (m *lstatErrorMockFS) Lstat(name string) (os.FileInfo, error) {
+	if err, ok := m.errForPath[name]; ok {
+		return nil, err
+	}
+	return m.mockFS.Lstat(name)
+}
+
+// setupObservedLogger creates a zap logger with an observer for inspecting log output in tests.
+func setupObservedLogger() (*zap.Logger, *observer.ObservedLogs) {
+	core, obs := observer.New(zap.DebugLevel)
+	return zap.New(core), obs
 }
 
 func TestHandleFsEvent_RemoveEvent(t *testing.T) {
