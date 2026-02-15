@@ -996,6 +996,123 @@ func TestGetMatchedFilesWithFS_NilFS(t *testing.T) {
 	})
 }
 
+// ============================================================
+// Tests for Go compiler temp file scenario
+// These reproduce the issue where Go 1.26 creates transient temp
+// files like "tmp/bin/<random>-go-tmp-umask" that should be
+// excludable by user-defined patterns.
+// ============================================================
+
+func TestFindTasksAffectedByFileChanges_GoCompilerTempFile_ExcludePattern(t *testing.T) {
+	// Scenario: user has a continuous "backend" task that watches tmp/bin/**
+	// and has an exclude pattern for Go compiler temp files.
+	// The temp file should be excluded and NOT trigger a restart.
+	yml := []byte(`
+tasks:
+  backend:
+    type: continuous
+    run: "echo backend"
+    include:
+      - "tmp/bin/**"
+    exclude:
+      - "*-go-tmp-*"
+`)
+	cfg, err := config.LoadFromBytes(yml)
+	assert.NoError(t, err)
+
+	runner, _ := testRunnerWithDeps(t, cfg)
+
+	now := time.Now()
+	events := map[string]watcher.AggregatedEvent{
+		"tmp/bin": {
+			Dir: "tmp/bin",
+			Files: map[string]*watcher.UpdatedFile{
+				"tmp/bin/adasdasderii4o4jro-go-tmp-umask": {ModifiedTime: now},
+			},
+			Tasks: map[string]bool{
+				"backend": true,
+			},
+		},
+	}
+
+	result := runner.findTasksAffectedByFileChanges(events)
+	assert.Empty(t, result,
+		"Go compiler temp file matching exclude pattern should not trigger backend restart")
+}
+
+func TestFindTasksAffectedByFileChanges_GoCompilerTempFile_NoExclude_MatchesInclude(t *testing.T) {
+	// Without an exclude pattern, the temp file SHOULD trigger a restart
+	// if it matches the include pattern. This confirms the include works.
+	yml := []byte(`
+tasks:
+  backend:
+    type: continuous
+    run: "echo backend"
+    include:
+      - "tmp/bin/**"
+`)
+	cfg, err := config.LoadFromBytes(yml)
+	assert.NoError(t, err)
+
+	runner, _ := testRunnerWithDeps(t, cfg)
+
+	now := time.Now()
+	events := map[string]watcher.AggregatedEvent{
+		"tmp/bin": {
+			Dir: "tmp/bin",
+			Files: map[string]*watcher.UpdatedFile{
+				"tmp/bin/adasdasderii4o4jro-go-tmp-umask": {ModifiedTime: now},
+			},
+			Tasks: map[string]bool{
+				"backend": true,
+			},
+		},
+	}
+
+	result := runner.findTasksAffectedByFileChanges(events)
+	assert.Len(t, result, 1,
+		"Without exclude, temp file matching include should trigger restart")
+	assert.Contains(t, result, "backend")
+}
+
+func TestFindTasksAffectedByFileChanges_GoCompilerTempFile_MixedWithBinary(t *testing.T) {
+	// Scenario: both the temp file AND the real binary appear in the same
+	// aggregated event batch. The temp file should be excluded but the
+	// binary should still trigger the restart.
+	yml := []byte(`
+tasks:
+  backend:
+    type: continuous
+    run: "echo backend"
+    include:
+      - "tmp/bin/**"
+    exclude:
+      - "*-go-tmp-*"
+`)
+	cfg, err := config.LoadFromBytes(yml)
+	assert.NoError(t, err)
+
+	runner, _ := testRunnerWithDeps(t, cfg)
+
+	now := time.Now()
+	events := map[string]watcher.AggregatedEvent{
+		"tmp/bin": {
+			Dir: "tmp/bin",
+			Files: map[string]*watcher.UpdatedFile{
+				"tmp/bin/adasdasderii4o4jro-go-tmp-umask": {ModifiedTime: now},
+				"tmp/bin/myapp": {ModifiedTime: now},
+			},
+			Tasks: map[string]bool{
+				"backend": true,
+			},
+		},
+	}
+
+	result := runner.findTasksAffectedByFileChanges(events)
+	assert.Len(t, result, 1, "Binary change should still trigger restart")
+	assert.Contains(t, result, "backend")
+}
+
 func TestNewRunner_NilPlatform(t *testing.T) {
 	// NewRunner with nil platform should not panic.
 	cfg := testConfig(t)

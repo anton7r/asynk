@@ -418,9 +418,11 @@ func setupObservedLogger() (*zap.Logger, *observer.ObservedLogs) {
 }
 
 func TestHandleFsEvent_RemoveEvent(t *testing.T) {
-	logger := zap.NewNop()
-	// The file is removed, so Lstat will not find it; the code handles Remove
-	// specially by using path.Dir instead of Lstat.
+	// Remove events should be silently skipped — a file deletion is not an
+	// actionable change and should not trigger task restarts. This also
+	// prevents a timing issue where the time.Now() timestamp on Remove
+	// events could defeat the filterRunningTasks deduplication check.
+	logger, obs := setupObservedLogger()
 	mfs := newMockFS()
 
 	dirs := &WatchableDirectories{
@@ -433,9 +435,9 @@ func TestHandleFsEvent_RemoveEvent(t *testing.T) {
 		},
 	}
 
-	eventsChan := make(chan map[string]AggregatedEvent, 1)
+	propagateCalled := false
 	propagate := func(events map[string]AggregatedEvent) {
-		eventsChan <- events
+		propagateCalled = true
 	}
 
 	fw := newTestFsWatcher()
@@ -447,16 +449,20 @@ func TestHandleFsEvent_RemoveEvent(t *testing.T) {
 		Op:   fsnotify.Remove,
 	})
 
-	select {
-	case events := <-eventsChan:
-		assert.Contains(t, events, "src")
-		agg := events["src"]
-		assert.Contains(t, agg.Files, "src/old_file.go")
-		assert.True(t, agg.Tasks["build"])
-		assert.True(t, agg.Tasks["lint"])
-	case <-time.After(2 * time.Second):
-		t.Fatal("Timed out waiting for propagated event")
+	time.Sleep(300 * time.Millisecond)
+	assert.False(t, propagateCalled,
+		"Remove events should be skipped and not trigger propagation")
+
+	// Verify a Debug log was emitted for the skip
+	debugLogs := obs.FilterLevelExact(zap.DebugLevel).All()
+	foundSkipLog := false
+	for _, entry := range debugLogs {
+		if entry.Message == "Skipping Remove event" {
+			foundSkipLog = true
+			break
+		}
 	}
+	assert.True(t, foundSkipLog, "Expected a Debug-level 'Skipping Remove event' log")
 
 	w.Close()
 }
@@ -1074,6 +1080,68 @@ func TestMatchWatchableDirectoriesWithFS_NilFS(t *testing.T) {
 		result := MatchWatchableDirectoriesWithFS(logger, configutil.GlobArray{}, taskConfigs, nil)
 		assert.NotNil(t, result, "result should be non-nil even with nil fs")
 	})
+}
+
+func TestHandleFsEvent_RemoveEvent_GoCompilerTempFile_NoRestart(t *testing.T) {
+	// The Go compiler creates a temp file (e.g., "xxx-go-tmp-umask") in tmp/bin/,
+	// then removes it. The Remove event for this temp file should not propagate
+	// to the runner and should not trigger a restart of continuous tasks.
+	// This was previously causing unnecessary restarts because Remove events
+	// used time.Now() as their modification time, defeating the
+	// filterRunningTasks deduplication check.
+	logger, obs := setupObservedLogger()
+	mfs := newMockFS()
+
+	dirs := &WatchableDirectories{
+		directories: map[string]WatchableDirectory{
+			"tmp/bin": {
+				MatchedDirectory: "tmp/bin",
+				RelativePath:     "./tmp/bin",
+				TaskIds:          map[string]bool{"backend": true},
+			},
+		},
+	}
+
+	propagateCalled := false
+	propagate := func(events map[string]AggregatedEvent) {
+		propagateCalled = true
+	}
+
+	fw := newTestFsWatcher()
+	w, err := NewWatcherWithDeps(logger, dirs, propagate, mfs, fw)
+	assert.NoError(t, err)
+
+	// Simulate the Remove event for the Go compiler temp file
+	w.handleFsEvent(fsnotify.Event{
+		Name: "tmp/bin/qRQZhbuU7fD54xuc7HUqzw-go-tmp-umask",
+		Op:   fsnotify.Remove,
+	})
+
+	time.Sleep(300 * time.Millisecond)
+	assert.False(t, propagateCalled,
+		"Remove event for Go compiler temp file should not trigger propagation")
+
+	// Also test Remove of the old intermediate binary
+	w.handleFsEvent(fsnotify.Event{
+		Name: "tmp/bin/Z4gUCoCCKAdhdeXNTfwq2w",
+		Op:   fsnotify.Remove,
+	})
+
+	time.Sleep(300 * time.Millisecond)
+	assert.False(t, propagateCalled,
+		"Remove event for old intermediate binary should not trigger propagation")
+
+	// Verify debug logs for both
+	debugLogs := obs.FilterLevelExact(zap.DebugLevel).All()
+	skipCount := 0
+	for _, entry := range debugLogs {
+		if entry.Message == "Skipping Remove event" {
+			skipCount++
+		}
+	}
+	assert.Equal(t, 2, skipCount, "Expected 2 'Skipping Remove event' debug logs")
+
+	w.Close()
 }
 
 func TestHandleFsEvent_BackslashPathNormalization(t *testing.T) {

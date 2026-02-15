@@ -147,48 +147,45 @@ func (w *Watcher) handleFsEvent(event fsnotify.Event) {
 		zap.String("filePath", changePath),
 	)
 
-	var dirPath string
-	var isDir bool
-	var modifiedTime time.Time
-
 	if event.Op&fsnotify.Remove == fsnotify.Remove {
-		// For removed files, we can't stat them. Use path.Dir as best approximation.
-		dirPath = path.Dir(changePath)
-		isDir = false
-		modifiedTime = time.Now()
-	} else {
-		stat, err := w.fs.Lstat(changePath)
-		if err != nil {
-			// If the file no longer exists, it was a transient file (e.g.,
-			// temporary files created and quickly deleted by build tools like
-			// the Go compiler). Treat this the same as a Remove event — skip
-			// it silently rather than logging an error.
-			if errors.Is(err, os.ErrNotExist) {
-				w.log.Debug("File no longer exists, skipping transient file event",
-					zap.String("filePath", changePath),
-				)
-				return
-			}
-			w.log.Error("Error getting file info", zap.Error(err))
+		// Removed files should not trigger task restarts. A file deletion is
+		// not an actionable change — the interesting events are CREATE and
+		// WRITE for new/updated files. Skipping Remove events also prevents
+		// a timing issue where the time.Now() timestamp assigned to Remove
+		// events could defeat the filterRunningTasks deduplication check,
+		// causing unnecessary restarts of continuous tasks.
+		w.log.Debug("Skipping Remove event",
+			zap.String("filePath", changePath),
+		)
+		return
+	}
+
+	stat, err := w.fs.Lstat(changePath)
+	if err != nil {
+		// If the file no longer exists, it was a transient file (e.g.,
+		// temporary files created and quickly deleted by build tools like
+		// the Go compiler). Treat this the same as a Remove event — skip
+		// it silently rather than logging an error.
+		if errors.Is(err, os.ErrNotExist) {
+			w.log.Debug("File no longer exists, skipping transient file event",
+				zap.String("filePath", changePath),
+			)
 			return
 		}
-
-		modifiedTime = stat.ModTime()
-		isDir = stat.IsDir()
-		if isDir {
-			dirPath = changePath
-		} else {
-			dirPath = path.Dir(changePath)
-		}
+		w.log.Error("Error getting file info", zap.Error(err))
+		return
 	}
 
-	// Check if it is actually a file
-	if !isDir {
-		w.checkIfWeNeedToNotify(changePath, dirPath, modifiedTime)
-	} else {
+	modifiedTime := stat.ModTime()
+	isDir := stat.IsDir()
+
+	if isDir {
 		// TODO: Add new watchers for new directories
-
+		return
 	}
+
+	dirPath := path.Dir(changePath)
+	w.checkIfWeNeedToNotify(changePath, dirPath, modifiedTime)
 
 }
 

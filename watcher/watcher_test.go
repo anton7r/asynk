@@ -190,7 +190,8 @@ func TestHandleFsEvent(t *testing.T) {
 		t.Fatal("Timed out waiting for event propagation")
 	}
 
-	// Test removal event (file)
+	// Test removal event (file) — Remove events should now be skipped
+	// and NOT trigger propagation, since deleted files are not actionable.
 	removeEvent := fsnotify.Event{
 		Name: testFilePath,
 		Op:   fsnotify.Remove,
@@ -198,13 +199,12 @@ func TestHandleFsEvent(t *testing.T) {
 
 	watcher.handleFsEvent(removeEvent)
 
-	// Wait for propagation
+	// Should NOT propagate
 	select {
-	case events := <-eventsChan:
-		assert.Contains(t, events, testDirPath)
-		assert.Contains(t, events[testDirPath].Files, testFilePath)
-	case <-time.After(1 * time.Second):
-		t.Fatal("Timed out waiting for event propagation")
+	case <-eventsChan:
+		t.Fatal("Remove event should not trigger propagation")
+	case <-time.After(300 * time.Millisecond):
+		// Expected — Remove events are skipped
 	}
 
 	// Clean up
