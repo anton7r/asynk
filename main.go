@@ -11,12 +11,17 @@ import (
 	"github.com/anton7r/asynk/util"
 )
 
+// Version is set at build time via ldflags:
+//
+//	go build -ldflags "-X main.Version=1.0.0"
+var Version = "dev"
+
 func main() {
 	// Parse command line flags
 	runOnce := flag.Bool("once", false, "Run all tasks once and exit without watching for file changes")
 	flag.Parse()
 
-	fmt.Println("github.com/anton7r/asynk is starting...")
+	fmt.Printf("github.com/anton7r/asynk %s is starting...\n", Version)
 
 	configuration, err := config.LoadFromYAML()
 
