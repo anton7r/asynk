@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"unicode"
 )
 
 var envNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
@@ -169,8 +170,14 @@ func (v *validator) validatePortConfigs() error {
 			return fmt.Errorf("invalid task configuration, preferred port is invalid for task '%s': %d", taskConfig.Identifier, portConfig.Preferred)
 		}
 
-		if err := validateRequiredPortRange(portConfig.Range, taskConfig.Identifier, "port range"); err != nil {
-			return err
+		if portConfig.Preferred == 0 && portConfig.Range == nil {
+			return fmt.Errorf("invalid task configuration, port needs a preferred port or range for task: %s", taskConfig.Identifier)
+		}
+
+		if portConfig.Range != nil {
+			if err := validatePortRange(portConfig.Range, taskConfig.Identifier, "port range"); err != nil {
+				return err
+			}
 		}
 
 		if portConfig.Expose == nil || portConfig.Expose.Proxy == nil || !portConfig.Expose.Proxy.Enabled {
@@ -217,6 +224,10 @@ func (v *validator) validateConsumes() error {
 				)
 			}
 
+			if consume.Task == taskConfig.Identifier {
+				return fmt.Errorf("invalid task configuration, task cannot consume itself: %s", taskConfig.Identifier)
+			}
+
 			if provider.Port == nil {
 				return fmt.Errorf("invalid task configuration, consumed task '%s' does not expose a port: %s", consume.Task, taskConfig.Identifier)
 			}
@@ -244,13 +255,7 @@ func (v *validator) validateConsumes() error {
 					return fmt.Errorf("invalid task configuration, consume env is invalid for task '%s': %s", taskConfig.Identifier, envName)
 				}
 
-				switch ConsumeExport(exportName) {
-				case ConsumeExport_Port, ConsumeExport_URL:
-				case ConsumeExport_ProxyURL:
-					if !hasEnabledProxy(provider) {
-						return fmt.Errorf("invalid task configuration, consumed task '%s' does not expose proxy-url: %s", consume.Task, taskConfig.Identifier)
-					}
-				default:
+				if !isValidConsumeExport(provider, exportName) {
 					return fmt.Errorf("invalid task configuration, consume export is invalid for task '%s': %s", taskConfig.Identifier, exportName)
 				}
 			}
@@ -267,12 +272,32 @@ func hasEnabledProxy(taskConfig *TaskConfig) bool {
 		taskConfig.Port.Expose.Proxy.Enabled
 }
 
-func validateRequiredPortRange(portRange *PortRangeConfig, taskId, label string) error {
-	if portRange == nil {
-		return fmt.Errorf("invalid task configuration, %s is missing: %s", label, taskId)
+func isValidConsumeExport(provider *TaskConfig, exportName string) bool {
+	switch ConsumeExport(exportName) {
+	case ConsumeExport_Port, ConsumeExport_URL:
+		return true
+	case ConsumeExport_ProxyURL:
+		return hasEnabledProxy(provider)
 	}
 
-	return validatePortRange(portRange, taskId, label)
+	serviceName := provider.Identifier
+	if provider.Port != nil && provider.Port.Expose != nil && provider.Port.Expose.Name != "" {
+		serviceName = provider.Port.Expose.Name
+	}
+
+	if exportName == exportEnvName(serviceName, "PORT") || exportName == exportEnvName(serviceName, "URL") {
+		return true
+	}
+
+	if !hasEnabledProxy(provider) {
+		return false
+	}
+
+	proxyEnv := provider.Port.Expose.Proxy.Env
+	if proxyEnv == "" {
+		proxyEnv = exportEnvName(serviceName, "PROXY_URL")
+	}
+	return exportName == proxyEnv
 }
 
 func validatePortRange(portRange *PortRangeConfig, taskId, label string) error {
@@ -302,6 +327,35 @@ func isReservedBuiltInExportName(name string) bool {
 	default:
 		return false
 	}
+}
+
+func exportEnvName(serviceName string, suffix string) string {
+	prefix := strings.Trim(sanitizeEnvSegment(serviceName), "_")
+	if prefix == "" {
+		prefix = "SERVICE"
+	}
+	return prefix + "_" + suffix
+}
+
+func sanitizeEnvSegment(value string) string {
+	var builder strings.Builder
+	lastUnderscore := false
+
+	for _, r := range strings.ToUpper(value) {
+		valid := r == '_' || unicode.IsLetter(r) || unicode.IsDigit(r)
+		if !valid {
+			if !lastUnderscore {
+				builder.WriteRune('_')
+				lastUnderscore = true
+			}
+			continue
+		}
+
+		builder.WriteRune(r)
+		lastUnderscore = r == '_'
+	}
+
+	return builder.String()
 }
 
 func validateConfig(config *Config) error {

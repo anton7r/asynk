@@ -491,6 +491,8 @@ func (runner *Runner) startScheduledTask(taskId string, scheduledTask *Scheduled
 		runner.onTaskStart(newTask)
 		if exportsChanged {
 			runner.scheduleConsumersForProvider(taskId)
+		} else {
+			runner.scheduleExplicitRestartConsumersForProvider(taskId)
 		}
 	}
 }

@@ -291,6 +291,22 @@ tasks:
 	assert.Equal(t, ConsumeOnChange_None, frontend.Consumes[0].OnChange)
 }
 
+func TestLoadFromBytes_PortConfigAllowsPreferredWithoutRange(t *testing.T) {
+	yml := []byte(`
+tasks:
+  backend:
+    type: continuous
+    run: "go run . --port ${PORT}"
+    port:
+      preferred: 3000
+`)
+	cfg, err := LoadFromBytes(yml)
+	if assert.NoError(t, err) && assert.NotNil(t, cfg) {
+		assert.Equal(t, 3000, cfg.Tasks["backend"].Port.Preferred)
+		assert.Nil(t, cfg.Tasks["backend"].Port.Range)
+	}
+}
+
 func TestLoadFromBytes_PortConfigRejectsBuildTask(t *testing.T) {
 	yml := []byte(`
 tasks:
@@ -365,6 +381,55 @@ tasks:
 	assert.Error(t, err)
 	assert.Nil(t, cfg)
 	assert.Contains(t, err.Error(), "does not expose a proxy")
+}
+
+func TestLoadFromBytes_ConsumesAcceptsGeneratedServiceExportNames(t *testing.T) {
+	yml := []byte(`
+tasks:
+  backend:
+    type: continuous
+    run: "go run ."
+    port:
+      preferred: 3000
+      expose:
+        name: backend
+        proxy:
+          enabled: true
+          env: API_PROXY_URL
+          preferred: 8080
+  frontend:
+    type: continuous
+    run: "npm run dev"
+    consumes:
+      - task: backend
+        env:
+          VITE_API_PORT: BACKEND_PORT
+          VITE_API_URL: BACKEND_URL
+          VITE_API_PROXY_URL: API_PROXY_URL
+`)
+	cfg, err := LoadFromBytes(yml)
+	assert.NoError(t, err)
+	assert.NotNil(t, cfg)
+}
+
+func TestLoadFromBytes_ConsumesRejectsSelfReference(t *testing.T) {
+	yml := []byte(`
+tasks:
+  backend:
+    type: continuous
+    run: "go run ."
+    port:
+      preferred: 3000
+    consumes:
+      - task: backend
+        env:
+          API_URL: url
+`)
+	cfg, err := LoadFromBytes(yml)
+	if assert.Error(t, err) {
+		assert.Contains(t, err.Error(), "cannot consume itself")
+	}
+	assert.Nil(t, cfg)
 }
 
 func TestLoadFromBytes_PortConfigRejectsProxyEnvShadowingBuiltInExport(t *testing.T) {

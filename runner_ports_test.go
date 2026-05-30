@@ -1,10 +1,16 @@
 package main
 
 import (
+	"fmt"
+	"net"
+	"sync"
 	"testing"
+	"time"
 
+	"github.com/anton7r/asynk/cmdwrap"
 	"github.com/anton7r/asynk/config"
 	"github.com/anton7r/asynk/portmanager"
+	"github.com/anton7r/asynk/util/interpolation/idgen"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -18,7 +24,28 @@ func (c *runnerPortChecker) Available(port int) bool {
 	return !c.unavailable[port]
 }
 
+func freeRunnerPort(t *testing.T) int {
+	t.Helper()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer listener.Close()
+
+	return listener.Addr().(*net.TCPAddr).Port
+}
+
 func testRunnerForPorts(t *testing.T, yml string, checker *runnerPortChecker) *Runner {
+	t.Helper()
+
+	return testRunnerForPortsWithFactory(t, yml, checker, &mockCommandFactory{})
+}
+
+func testRunnerForPortsWithFactory(
+	t *testing.T,
+	yml string,
+	checker *runnerPortChecker,
+	factory cmdwrap.CommandFactory,
+) *Runner {
 	t.Helper()
 
 	cfg, err := config.LoadFromBytes([]byte(yml))
@@ -27,11 +54,43 @@ func testRunnerForPorts(t *testing.T, yml string, checker *runnerPortChecker) *R
 	deps := RunnerDeps{
 		Platform:    testPlatform(),
 		FS:          nil,
-		CmdFactory:  &mockCommandFactory{},
+		CmdFactory:  factory,
 		PortManager: portmanager.NewManager(checker),
 	}
 
 	return NewRunnerWithDeps(cfg, zap.NewNop(), true, deps)
+}
+
+type recordingCommandFactory struct {
+	mu    sync.Mutex
+	calls []string
+}
+
+func (f *recordingCommandFactory) ParseAllCommands(
+	commands config.RunCommands,
+	taskId string,
+	log *zap.Logger,
+	env map[string]string,
+	cwd string,
+	genIdInterpolator *idgen.GenIDInterpolator,
+) ([]*cmdwrap.CommandWrapper, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.calls = append(f.calls, taskId)
+	return []*cmdwrap.CommandWrapper{}, nil
+}
+
+func (f *recordingCommandFactory) Called(taskID string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	for _, call := range f.calls {
+		if call == taskID {
+			return true
+		}
+	}
+	return false
 }
 
 func TestPrepareTaskForStart_AssignsPortToEnvAndInterpolationMap(t *testing.T) {
@@ -249,4 +308,46 @@ tasks:
 	runner.releaseTaskPorts("backend")
 
 	assert.False(t, runner.canStartTask(&ScheduledTask{TaskConfiguration: runner.Config.Tasks["frontend"]}))
+}
+
+func TestStartScheduledTask_SchedulesExplicitRestartConsumerWhenExportsStayStable(t *testing.T) {
+	checker := &runnerPortChecker{unavailable: map[int]bool{}}
+	factory := &recordingCommandFactory{}
+	runner := testRunnerForPortsWithFactory(t, fmt.Sprintf(`
+tasks:
+  backend:
+    type: continuous
+    run: "go run . --port ${PORT}"
+    port:
+      preferred: 3000
+      range:
+        start: 3000
+        end: 3002
+      expose:
+        proxy:
+          enabled: true
+          preferred: %d
+  frontend:
+    type: continuous
+    run: "npm run dev"
+    consumes:
+      - task: backend
+        env:
+          VITE_API_URL: proxy-url
+        on-change: restart
+`, freeRunnerPort(t)), checker, factory)
+
+	_, _, changed, err := runner.prepareTaskForStart(runner.Config.Tasks["backend"])
+	require.NoError(t, err)
+	require.True(t, changed)
+
+	runner.startScheduledTask("backend", &ScheduledTask{TaskConfiguration: runner.Config.Tasks["backend"]})
+
+	assert.Eventually(t, func() bool {
+		runner.ScheduledTaskMutex.Lock()
+		queued := runner.ScheduledTasks["frontend"] != nil
+		runner.ScheduledTaskMutex.Unlock()
+
+		return queued || factory.Called("frontend")
+	}, time.Second, 10*time.Millisecond)
 }

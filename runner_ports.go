@@ -213,6 +213,21 @@ func (runner *Runner) scheduleConsumersForProvider(providerTaskID string) {
 	runner.scheduleConsumersForProviderLocked(providerTaskID)
 }
 
+func (runner *Runner) scheduleExplicitRestartConsumersForProvider(providerTaskID string) {
+	runner.ScheduledTaskMutex.Lock()
+	defer runner.ScheduledTaskMutex.Unlock()
+
+	for taskID, taskConfig := range runner.Config.Tasks {
+		for _, consume := range taskConfig.Consumes {
+			if consume.Task != providerTaskID || consume.OnChange != config.ConsumeOnChange_Restart {
+				continue
+			}
+
+			runner.ScheduledTasks[taskID] = &ScheduledTask{TaskConfiguration: taskConfig}
+		}
+	}
+}
+
 func (runner *Runner) scheduleConsumersForProviderLocked(providerTaskID string) {
 	for taskID, taskConfig := range runner.Config.Tasks {
 		for _, consume := range taskConfig.Consumes {
