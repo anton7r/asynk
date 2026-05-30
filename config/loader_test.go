@@ -455,6 +455,32 @@ tasks:
 	assert.Nil(t, cfg)
 }
 
+func TestLoadFromBytes_PortConfigRejectsProxyEnvShadowingNamedDirectExport(t *testing.T) {
+	for _, proxyEnv := range []string{"BACKEND_URL", "BACKEND_PORT"} {
+		t.Run(proxyEnv, func(t *testing.T) {
+			yml := []byte(`
+tasks:
+  backend:
+    type: continuous
+    run: "go run ."
+    port:
+      preferred: 3000
+      expose:
+        name: backend
+        proxy:
+          enabled: true
+          env: ` + proxyEnv + `
+          preferred: 8080
+`)
+			cfg, err := LoadFromBytes(yml)
+			if assert.Error(t, err) {
+				assert.Contains(t, err.Error(), "proxy env shadows reserved export")
+			}
+			assert.Nil(t, cfg)
+		})
+	}
+}
+
 func TestFillTaskIds(t *testing.T) {
 	cfg := &Config{
 		Tasks: map[string]*TaskConfig{

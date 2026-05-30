@@ -188,7 +188,7 @@ func (v *validator) validatePortConfigs() error {
 		if proxy.Env != "" && !isValidEnvName(proxy.Env) {
 			return fmt.Errorf("invalid task configuration, proxy env is invalid for task '%s': %s", taskConfig.Identifier, proxy.Env)
 		}
-		if proxy.Env != "" && isReservedBuiltInExportName(proxy.Env) {
+		if proxy.Env != "" && isReservedProxyExportName(taskConfig, proxy.Env) {
 			return fmt.Errorf("invalid task configuration, proxy env shadows reserved export for task '%s': %s", taskConfig.Identifier, proxy.Env)
 		}
 
@@ -300,6 +300,14 @@ func isValidConsumeExport(provider *TaskConfig, exportName string) bool {
 	return exportName == proxyEnv
 }
 
+func serviceNameForTask(taskConfig *TaskConfig) string {
+	serviceName := taskConfig.Identifier
+	if taskConfig.Port != nil && taskConfig.Port.Expose != nil && taskConfig.Port.Expose.Name != "" {
+		serviceName = taskConfig.Port.Expose.Name
+	}
+	return serviceName
+}
+
 func validatePortRange(portRange *PortRangeConfig, taskId, label string) error {
 	if !isValidPort(portRange.Start) || !isValidPort(portRange.End) {
 		return fmt.Errorf("invalid task configuration, %s has invalid port values for task: %s", label, taskId)
@@ -327,6 +335,15 @@ func isReservedBuiltInExportName(name string) bool {
 	default:
 		return false
 	}
+}
+
+func isReservedProxyExportName(taskConfig *TaskConfig, name string) bool {
+	if isReservedBuiltInExportName(name) {
+		return true
+	}
+
+	serviceName := serviceNameForTask(taskConfig)
+	return name == exportEnvName(serviceName, "PORT") || name == exportEnvName(serviceName, "URL")
 }
 
 func exportEnvName(serviceName string, suffix string) string {

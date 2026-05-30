@@ -249,14 +249,14 @@ func (runner *Runner) shouldRestartOnProviderChange(consume config.ConsumeConfig
 		return false
 	}
 
-	if consumeUsesDirectExports(consume) {
+	provider := runner.Config.Tasks[consume.Task]
+	if consumeUsesDirectExports(consume, provider) {
 		return true
 	}
 
-	provider := runner.Config.Tasks[consume.Task]
 	mode := consume.Mode
 	if mode == "" {
-		if consumeUsesOnlyProxyExports(consume) && providerHasProxy(provider) {
+		if consumeUsesOnlyProxyExports(consume, provider) && providerHasProxy(provider) {
 			mode = config.ConsumeMode_Proxy
 		} else {
 			mode = config.ConsumeMode_Direct
@@ -266,27 +266,64 @@ func (runner *Runner) shouldRestartOnProviderChange(consume config.ConsumeConfig
 	return mode == config.ConsumeMode_Direct
 }
 
-func consumeUsesDirectExports(consume config.ConsumeConfig) bool {
+func consumeUsesDirectExports(consume config.ConsumeConfig, provider *config.TaskConfig) bool {
 	for _, exportName := range consume.Env {
-		switch config.ConsumeExport(exportName) {
-		case config.ConsumeExport_Port, config.ConsumeExport_URL:
+		if isDirectExportName(provider, exportName) {
 			return true
 		}
 	}
 	return false
 }
 
-func consumeUsesOnlyProxyExports(consume config.ConsumeConfig) bool {
+func consumeUsesOnlyProxyExports(consume config.ConsumeConfig, provider *config.TaskConfig) bool {
 	if len(consume.Env) == 0 {
 		return false
 	}
 
 	for _, exportName := range consume.Env {
-		if config.ConsumeExport(exportName) != config.ConsumeExport_ProxyURL {
+		if !isProxyExportName(provider, exportName) {
 			return false
 		}
 	}
 	return true
+}
+
+func isDirectExportName(provider *config.TaskConfig, exportName string) bool {
+	switch config.ConsumeExport(exportName) {
+	case config.ConsumeExport_Port, config.ConsumeExport_URL:
+		return true
+	}
+
+	if provider == nil {
+		return false
+	}
+
+	serviceName := serviceNameForTask(provider)
+	return exportName == exportEnvName(serviceName, "PORT") || exportName == exportEnvName(serviceName, "URL")
+}
+
+func isProxyExportName(provider *config.TaskConfig, exportName string) bool {
+	if config.ConsumeExport(exportName) == config.ConsumeExport_ProxyURL {
+		return true
+	}
+
+	if !providerHasProxy(provider) {
+		return false
+	}
+
+	proxyEnv := provider.Port.Expose.Proxy.Env
+	if proxyEnv == "" {
+		proxyEnv = exportEnvName(serviceNameForTask(provider), "PROXY_URL")
+	}
+	return exportName == proxyEnv
+}
+
+func serviceNameForTask(taskConfig *config.TaskConfig) string {
+	serviceName := taskConfig.Identifier
+	if taskConfig.Port != nil && taskConfig.Port.Expose != nil && taskConfig.Port.Expose.Name != "" {
+		serviceName = taskConfig.Port.Expose.Name
+	}
+	return serviceName
 }
 
 func cloneTaskConfig(taskConfig *config.TaskConfig) *config.TaskConfig {

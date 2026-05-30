@@ -280,6 +280,96 @@ tasks:
 	assert.True(t, runner.shouldRestartOnProviderChange(runner.Config.Tasks["frontend"].Consumes[0]))
 }
 
+func TestShouldRestartOnProviderChange_RestartsNamedDirectExportsWithExplicitProxyMode(t *testing.T) {
+	checker := &runnerPortChecker{unavailable: map[int]bool{}}
+	runner := testRunnerForPorts(t, `
+tasks:
+  backend:
+    type: continuous
+    run: "go run . --port ${PORT}"
+    port:
+      preferred: 3000
+      range:
+        start: 3000
+        end: 3002
+      expose:
+        name: backend
+        proxy:
+          enabled: true
+          preferred: 8080
+  url-frontend:
+    type: continuous
+    run: "npm run dev"
+    consumes:
+      - task: backend
+        mode: proxy
+        env:
+          VITE_API_URL: BACKEND_URL
+  port-frontend:
+    type: continuous
+    run: "npm run dev"
+    consumes:
+      - task: backend
+        mode: proxy
+        env:
+          API_PORT: BACKEND_PORT
+`, checker)
+
+	assert.True(t, runner.shouldRestartOnProviderChange(runner.Config.Tasks["url-frontend"].Consumes[0]))
+	assert.True(t, runner.shouldRestartOnProviderChange(runner.Config.Tasks["port-frontend"].Consumes[0]))
+}
+
+func TestShouldRestartOnProviderChange_TreatsCustomProxyExportAsProxyBacked(t *testing.T) {
+	checker := &runnerPortChecker{unavailable: map[int]bool{}}
+	runner := testRunnerForPorts(t, `
+tasks:
+  backend:
+    type: continuous
+    run: "go run . --port ${PORT}"
+    port:
+      preferred: 3000
+      range:
+        start: 3000
+        end: 3002
+      expose:
+        name: backend
+        proxy:
+          enabled: true
+          env: API_PROXY_URL
+          preferred: 8080
+  default-backend:
+    type: continuous
+    run: "go run . --port ${PORT}"
+    port:
+      preferred: 3010
+      range:
+        start: 3010
+        end: 3012
+      expose:
+        name: backend
+        proxy:
+          enabled: true
+          preferred: 8081
+  custom-proxy-frontend:
+    type: continuous
+    run: "npm run dev"
+    consumes:
+      - task: backend
+        env:
+          VITE_API_URL: API_PROXY_URL
+  default-proxy-frontend:
+    type: continuous
+    run: "npm run dev"
+    consumes:
+      - task: default-backend
+        env:
+          VITE_API_URL: BACKEND_PROXY_URL
+`, checker)
+
+	assert.False(t, runner.shouldRestartOnProviderChange(runner.Config.Tasks["custom-proxy-frontend"].Consumes[0]))
+	assert.False(t, runner.shouldRestartOnProviderChange(runner.Config.Tasks["default-proxy-frontend"].Consumes[0]))
+}
+
 func TestReleaseTaskPorts_ClearsDirectExportsForConsumers(t *testing.T) {
 	checker := &runnerPortChecker{unavailable: map[int]bool{}}
 	runner := testRunnerForPorts(t, `
