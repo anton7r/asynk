@@ -157,3 +157,44 @@ asynk
   ```sh
   asynk --once
   ```
+
+## Managed ports and service exports
+
+Continuous tasks can opt in to managed port assignment. Asynk checks whether the last assigned or preferred port is available and falls back to the configured range when a previous process or another application is still holding it. The assigned value is injected into the task environment and can be used in `run` commands with `${PORT}` interpolation.
+
+Backends can also expose a stable local HTTP/WebSocket proxy. This lets a frontend use one stable URL while Asynk moves the backend process to a new port when needed.
+
+```yaml
+tasks:
+  backend:
+    type: continuous
+    run: "go run ./cmd/api --port ${PORT}"
+    include:
+      - "**/*.go"
+    port:
+      preferred: 3000
+      range:
+        start: 3000
+        end: 3099
+      expose:
+        name: backend
+        proxy:
+          enabled: true
+          preferred: 8080
+          range:
+            start: 8080
+            end: 8099
+
+  frontend:
+    type: continuous
+    run: "npm run dev"
+    include:
+      - "src/**"
+      - "package.json"
+    consumes:
+      - task: backend
+        env:
+          VITE_API_URL: proxy-url
+```
+
+Consumer tasks wait until provider exports are available. When a frontend consumes a backend directly with `port` or `url`, it restarts on backend port changes by default. When it consumes `proxy-url`, the proxy target updates in place and the frontend does not restart unless `on-change: restart` is configured.

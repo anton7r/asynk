@@ -241,6 +241,132 @@ tasks:
 	assert.Equal(t, []string{"go run . -mac"}, server.RunMac.LegacyStrings())
 }
 
+func TestLoadFromBytes_PortConfig(t *testing.T) {
+	yml := []byte(`
+tasks:
+  backend:
+    type: continuous
+    run: "go run . --port ${PORT}"
+    port:
+      env: PORT
+      preferred: 3000
+      range:
+        start: 3000
+        end: 3099
+      expose:
+        name: backend
+        proxy:
+          enabled: true
+          preferred: 8080
+          range:
+            start: 8080
+            end: 8099
+  frontend:
+    type: continuous
+    run: "npm run dev"
+    consumes:
+      - task: backend
+        mode: proxy
+        env:
+          VITE_API_URL: proxy-url
+        on-change: none
+`)
+	cfg, err := LoadFromBytes(yml)
+	assert.NoError(t, err)
+	assert.NotNil(t, cfg)
+
+	backend := cfg.Tasks["backend"]
+	assert.Equal(t, "PORT", backend.Port.Env)
+	assert.Equal(t, 3000, backend.Port.Preferred)
+	assert.Equal(t, 3000, backend.Port.Range.Start)
+	assert.Equal(t, "backend", backend.Port.Expose.Name)
+	assert.True(t, backend.Port.Expose.Proxy.Enabled)
+	assert.Equal(t, 8080, backend.Port.Expose.Proxy.Preferred)
+
+	frontend := cfg.Tasks["frontend"]
+	assert.Len(t, frontend.Consumes, 1)
+	assert.Equal(t, "backend", frontend.Consumes[0].Task)
+	assert.Equal(t, ConsumeMode_Proxy, frontend.Consumes[0].Mode)
+	assert.Equal(t, "proxy-url", frontend.Consumes[0].Env["VITE_API_URL"])
+	assert.Equal(t, ConsumeOnChange_None, frontend.Consumes[0].OnChange)
+}
+
+func TestLoadFromBytes_PortConfigRejectsBuildTask(t *testing.T) {
+	yml := []byte(`
+tasks:
+  build:
+    type: build
+    run: "go build ."
+    port:
+      range:
+        start: 3000
+        end: 3001
+`)
+	cfg, err := LoadFromBytes(yml)
+	assert.Error(t, err)
+	assert.Nil(t, cfg)
+	assert.Contains(t, err.Error(), "port can only be configured for continuous tasks")
+}
+
+func TestLoadFromBytes_PortConfigRejectsInvalidRange(t *testing.T) {
+	yml := []byte(`
+tasks:
+  backend:
+    type: continuous
+    run: "go run ."
+    port:
+      range:
+        start: 3002
+        end: 3001
+`)
+	cfg, err := LoadFromBytes(yml)
+	assert.Error(t, err)
+	assert.Nil(t, cfg)
+	assert.Contains(t, err.Error(), "start must be less than or equal to end")
+}
+
+func TestLoadFromBytes_ConsumesRejectsMissingProvider(t *testing.T) {
+	yml := []byte(`
+tasks:
+  frontend:
+    type: continuous
+    run: "npm run dev"
+    consumes:
+      - task: backend
+        env:
+          VITE_API_URL: url
+`)
+	cfg, err := LoadFromBytes(yml)
+	assert.Error(t, err)
+	assert.Nil(t, cfg)
+	assert.Contains(t, err.Error(), "consumed task 'backend' does not exist")
+}
+
+func TestLoadFromBytes_ConsumesRejectsProxyModeWithoutProxy(t *testing.T) {
+	yml := []byte(`
+tasks:
+  backend:
+    type: continuous
+    run: "go run ."
+    port:
+      range:
+        start: 3000
+        end: 3001
+  frontend:
+    type: continuous
+    run: "npm run dev"
+    consumes:
+      - task: backend
+        mode: proxy
+        env:
+          VITE_API_URL: proxy-url
+`)
+	cfg, err := LoadFromBytes(yml)
+	assert.Error(t, err)
+	assert.Nil(t, cfg)
+	assert.Contains(t, err.Error(), "does not expose a proxy")
+}
+
 func TestFillTaskIds(t *testing.T) {
 	cfg := &Config{
 		Tasks: map[string]*TaskConfig{

@@ -7,6 +7,8 @@ import (
 	"github.com/anton7r/asynk/cmdwrap"
 	"github.com/anton7r/asynk/config"
 	"github.com/anton7r/asynk/files"
+	"github.com/anton7r/asynk/portmanager"
+	asynkproxy "github.com/anton7r/asynk/proxy"
 	"github.com/anton7r/asynk/task"
 	"github.com/anton7r/asynk/util"
 	"github.com/anton7r/asynk/watcher"
@@ -44,6 +46,10 @@ type Runner struct {
 	wrapLogger         *cmdwrap.WrapLogger
 	watch              *watcher.Watcher
 	env                map[string]string
+	portManager        *portmanager.Manager
+	proxyManager       *asynkproxy.Manager
+	serviceExports     map[string]map[string]string
+	serviceExportMutex sync.Mutex
 	deps               RunnerDeps
 	runOnce            bool
 	completionChan     chan struct{}
@@ -52,25 +58,31 @@ type Runner struct {
 // RunnerDeps holds all injectable infrastructure dependencies for the Runner.
 // Use DefaultRunnerDeps() for production; provide custom implementations for testing.
 type RunnerDeps struct {
-	Platform   *util.Platform
-	FS         util.FileSystem
-	CmdFactory cmdwrap.CommandFactory
+	Platform     *util.Platform
+	FS           util.FileSystem
+	CmdFactory   cmdwrap.CommandFactory
+	PortManager  *portmanager.Manager
+	ProxyManager *asynkproxy.Manager
 }
 
 // DefaultRunnerDeps returns production infrastructure dependencies.
 func DefaultRunnerDeps() RunnerDeps {
 	return RunnerDeps{
-		Platform:   util.NewPlatform(),
-		FS:         util.NewOSFileSystem(),
-		CmdFactory: cmdwrap.NewDefaultCommandFactory(cmdwrap.DefaultProcessManager()),
+		Platform:     util.NewPlatform(),
+		FS:           util.NewOSFileSystem(),
+		CmdFactory:   cmdwrap.NewDefaultCommandFactory(cmdwrap.DefaultProcessManager()),
+		PortManager:  portmanager.NewManager(nil),
+		ProxyManager: asynkproxy.NewManager(),
 	}
 }
 
 func NewRunner(configuration *config.Config, log *zap.Logger, runOnce bool, platform *util.Platform) *Runner {
 	deps := RunnerDeps{
-		Platform:   platform,
-		FS:         util.NewOSFileSystem(),
-		CmdFactory: cmdwrap.NewDefaultCommandFactory(cmdwrap.DefaultProcessManager()),
+		Platform:     platform,
+		FS:           util.NewOSFileSystem(),
+		CmdFactory:   cmdwrap.NewDefaultCommandFactory(cmdwrap.DefaultProcessManager()),
+		PortManager:  portmanager.NewManager(nil),
+		ProxyManager: asynkproxy.NewManager(),
 	}
 	return NewRunnerWithDeps(configuration, log, runOnce, deps)
 }
@@ -85,6 +97,12 @@ func NewRunnerWithDeps(configuration *config.Config, log *zap.Logger, runOnce bo
 	if deps.CmdFactory == nil {
 		deps.CmdFactory = cmdwrap.NewDefaultCommandFactory(cmdwrap.DefaultProcessManager())
 	}
+	if deps.PortManager == nil {
+		deps.PortManager = portmanager.NewManager(nil)
+	}
+	if deps.ProxyManager == nil {
+		deps.ProxyManager = asynkproxy.NewManager()
+	}
 
 	runner := &Runner{
 		Config:             configuration,
@@ -93,6 +111,9 @@ func NewRunnerWithDeps(configuration *config.Config, log *zap.Logger, runOnce bo
 		lastTaskStartTimes: make(map[string]time.Time),
 		log:                log,
 		env:                make(map[string]string),
+		portManager:        deps.PortManager,
+		proxyManager:       deps.ProxyManager,
+		serviceExports:     make(map[string]map[string]string),
 		deps:               deps,
 		runOnce:            runOnce,
 		completionChan:     make(chan struct{}, 1),
@@ -143,6 +164,7 @@ func (runner *Runner) Stop() {
 	}
 
 	runner.stopRunningTasks()
+	runner.closeManagedProxies()
 }
 
 func (runner *Runner) stopRunningTasks() {
@@ -324,6 +346,8 @@ func (runner *Runner) onTaskFinished(taskIdentifier string, errored bool) {
 	runningCount := len(runner.RunningTasks)
 	runner.RunningTaskMutex.Unlock()
 
+	runner.releaseTaskPorts(taskIdentifier)
+
 	if errored {
 		// In single-run mode, check if all tasks are done
 		if runner.runOnce {
@@ -399,64 +423,76 @@ func (runner *Runner) startCleanUp() {
 	}
 }
 
-// Starts the scheduled tasks concurrently if they can be started
-// This will be called from multiple goroutines, so we need to lock the runningTasks
-// and scheduled task slice to prevent data races
+// Starts scheduled tasks as soon as dependencies and consumed exports are ready.
+// This can be called from multiple goroutines, so task queues and running task
+// state are guarded separately.
 func (runner *Runner) startScheduledTasks() {
-	runner.ScheduledTaskMutex.Lock()
-	defer runner.ScheduledTaskMutex.Unlock()
+	for {
+		runner.ScheduledTaskMutex.Lock()
 
-	if len(runner.ScheduledTasks) == 0 {
-		runner.log.Debug("No scheduled tasks to start.")
-		return
-	}
+		if len(runner.ScheduledTasks) == 0 {
+			runner.ScheduledTaskMutex.Unlock()
+			runner.log.Debug("No scheduled tasks to start.")
+			return
+		}
 
-	runner.log.Debug("Starting scheduled tasks concurrently...", zap.Int("count", len(runner.ScheduledTasks)))
-
-	for taskId, scheduledTask := range runner.ScheduledTasks {
-		if runner.canStartTask(scheduledTask) {
-			// Remove from scheduled tasks to prevent duplicate starts
-			delete(runner.ScheduledTasks, taskId)
-
-			taskType := scheduledTask.TaskConfiguration.Type
-
-			if taskType == config.TaskType_Continuous && runner.isTaskRunning(taskId) {
-				// Restart the running continuous task
-				runner.RunningTaskMutex.Lock()
-				runningTask := runner.getRunningTask(taskId)
-				runner.RunningTaskMutex.Unlock()
-				if runningTask != nil {
-					runningTask.StopGracefully()
-					// Wait for the task to exit before starting a new one
-					runner.log.Info("Waiting for running task to finish before starting a new one",
-						zap.String("taskId", taskId))
-					runningTask.Wait()
-					runner.log.Info("Running task finished, starting new instance")
-					runner.RunningTaskMutex.Lock()
-					runner.RunningTasks = task.RemoveRunningTask(runner.RunningTasks, taskId)
-					runner.RunningTaskMutex.Unlock()
-				}
-				// Record start time BEFORE launching the async task.
-				// This closes the race where filterRunningTasks could miss
-				// a task that was just started but not yet in RunningTasks.
-				runner.recordTaskStartTime(taskId)
-				// Start a new instance
-				newTask := runner.startTaskAsync(scheduledTask)
-				if newTask != nil {
-					runner.onTaskStart(newTask)
-				}
-			} else {
-				// Record start time BEFORE launching the async task.
-				runner.recordTaskStartTime(taskId)
-				newTask := runner.startTaskAsync(scheduledTask)
-				if newTask != nil {
-					runner.onTaskStart(newTask)
-				}
+		var selectedTaskID string
+		var selectedTask *ScheduledTask
+		for taskId, scheduledTask := range runner.ScheduledTasks {
+			if runner.canStartTask(scheduledTask) {
+				selectedTaskID = taskId
+				selectedTask = scheduledTask
+				delete(runner.ScheduledTasks, taskId)
+				break
 			}
+		}
+
+		remainingCount := len(runner.ScheduledTasks)
+		runner.ScheduledTaskMutex.Unlock()
+
+		if selectedTask == nil {
+			runner.log.Debug("No startable scheduled tasks.", zap.Int("count", remainingCount))
+			return
+		}
+
+		runner.startScheduledTask(selectedTaskID, selectedTask)
+	}
+}
+
+func (runner *Runner) startScheduledTask(taskId string, scheduledTask *ScheduledTask) {
+	taskType := scheduledTask.TaskConfiguration.Type
+
+	if taskType == config.TaskType_Continuous {
+		runner.RunningTaskMutex.Lock()
+		runningTask := runner.getRunningTask(taskId)
+		runner.RunningTaskMutex.Unlock()
+		if runningTask != nil {
+			runningTask.StopGracefully()
+			runner.log.Info("Waiting for running task to finish before starting a new one",
+				zap.String("taskId", taskId))
+			runningTask.Wait()
+			runner.log.Info("Running task finished, starting new instance")
+			runner.RunningTaskMutex.Lock()
+			runner.RunningTasks = task.RemoveRunningTask(runner.RunningTasks, taskId)
+			runner.RunningTaskMutex.Unlock()
 		}
 	}
 
-	runner.log.Debug("Started scheduled tasks concurrently.", zap.Int("count", len(runner.ScheduledTasks)))
+	preparedTaskConfig, globalEnv, exportsChanged, err := runner.prepareTaskForStart(scheduledTask.TaskConfiguration)
+	if err != nil {
+		runner.log.Error("Failed to prepare task for start", zap.String("taskId", taskId), zap.Error(err))
+		runner.onTaskFinished(taskId, true)
+		return
+	}
+
+	runner.recordTaskStartTime(taskId)
+	newTask := runner.startTaskAsync(&ScheduledTask{TaskConfiguration: preparedTaskConfig}, globalEnv)
+	if newTask != nil {
+		runner.onTaskStart(newTask)
+		if exportsChanged {
+			runner.scheduleConsumersForProvider(taskId)
+		}
+	}
 }
 
 func (runner *Runner) isTaskInQueue(taskIdentifier string) bool {
@@ -513,6 +549,10 @@ func (runner *Runner) canStartTask(scheduledTask *ScheduledTask) bool {
 		}
 	}
 
+	if !runner.consumesReady(scheduledTask.TaskConfiguration) {
+		return false
+	}
+
 	runner.log.Info("Task can be started",
 		zap.String("taskId", id))
 	return true
@@ -520,12 +560,13 @@ func (runner *Runner) canStartTask(scheduledTask *ScheduledTask) bool {
 
 func (r *Runner) startTaskAsync(
 	scheduledTask *ScheduledTask,
+	globalEnv map[string]string,
 ) *task.RunningTask {
 	runningTask := task.NewRunningTaskWithFactory(
 		scheduledTask.TaskConfiguration,
 		r.log,
 		r.wrapLogger,
-		r.env,
+		globalEnv,
 		r.onTaskFinished,
 		r.deps.Platform,
 		r.deps.CmdFactory,

@@ -28,6 +28,59 @@ const (
 	CleanUpStrategy_KeepLatest CleanUpStrategy = "keep-latest"
 )
 
+type ConsumeMode string
+
+const (
+	ConsumeMode_Direct ConsumeMode = "direct"
+	ConsumeMode_Proxy  ConsumeMode = "proxy"
+)
+
+type ConsumeOnChange string
+
+const (
+	ConsumeOnChange_None    ConsumeOnChange = "none"
+	ConsumeOnChange_Restart ConsumeOnChange = "restart"
+)
+
+type ConsumeExport string
+
+const (
+	ConsumeExport_Port     ConsumeExport = "port"
+	ConsumeExport_URL      ConsumeExport = "url"
+	ConsumeExport_ProxyURL ConsumeExport = "proxy-url"
+)
+
+type PortRangeConfig struct {
+	Start int `yaml:"start"`
+	End   int `yaml:"end"`
+}
+
+type ProxyConfig struct {
+	Enabled   bool             `yaml:"enabled"`
+	Env       string           `yaml:"env"`
+	Preferred int              `yaml:"preferred"`
+	Range     *PortRangeConfig `yaml:"range"`
+}
+
+type PortExposeConfig struct {
+	Name  string       `yaml:"name"`
+	Proxy *ProxyConfig `yaml:"proxy"`
+}
+
+type PortConfig struct {
+	Env       string            `yaml:"env"`
+	Preferred int               `yaml:"preferred"`
+	Range     *PortRangeConfig  `yaml:"range"`
+	Expose    *PortExposeConfig `yaml:"expose"`
+}
+
+type ConsumeConfig struct {
+	Task     string            `yaml:"task"`
+	Mode     ConsumeMode       `yaml:"mode"`
+	Env      map[string]string `yaml:"env"`
+	OnChange ConsumeOnChange   `yaml:"on-change"`
+}
+
 type TaskConfig struct {
 	Identifier string `yaml:"-"`
 	ConfigDir  string `yaml:"-"`
@@ -48,6 +101,10 @@ type TaskConfig struct {
 	Dependencies util.StringArray `yaml:"dependencies"`
 	// Environment variables to set for the task.
 	Env util.StringArray `yaml:"env"`
+	// Optional port assignment for long-running application tasks.
+	Port *PortConfig `yaml:"port"`
+	// Runtime values this task consumes from other tasks.
+	Consumes []ConsumeConfig `yaml:"consumes"`
 }
 
 type CleanUpTaskConfig struct {

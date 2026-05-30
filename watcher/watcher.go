@@ -194,7 +194,7 @@ func (w *Watcher) checkIfWeNeedToNotify(
 	dirPath string,
 	modifiedTime time.Time,
 ) {
-	directories, ok := w.directories.directories[dirPath]
+	eventDirPath, eventFilePath, directories, ok := w.findWatchableDirectory(dirPath, changePath)
 
 	if !ok {
 		w.log.Info("Directory not found in watchable directories",
@@ -206,28 +206,59 @@ func (w *Watcher) checkIfWeNeedToNotify(
 
 	if len(tasks) > 0 {
 		w.aggregator.aggregatorLock.Lock()
-		event, exists := w.aggregator.aggregated[dirPath]
+		event, exists := w.aggregator.aggregated[eventDirPath]
 		if !exists {
 			event = AggregatedEvent{
-				Dir:   dirPath,
+				Dir:   eventDirPath,
 				Files: make(map[string]*UpdatedFile),
 				Tasks: make(map[string]bool),
 			}
 		}
 
-		event.Files[changePath] = &UpdatedFile{
+		event.Files[eventFilePath] = &UpdatedFile{
 			ModifiedTime: modifiedTime,
 		}
 		for taskId := range tasks {
 			event.Tasks[taskId] = true
 		}
-		w.aggregator.aggregated[dirPath] = event
+		w.aggregator.aggregated[eventDirPath] = event
 		delay := time.Millisecond * 200
 		w.aggregator.changeId++
 		w.aggregator.aggregatorLock.Unlock()
 
 		go w.propagateEvents(delay, w.aggregator.changeId)
 	}
+}
+
+func (w *Watcher) findWatchableDirectory(dirPath string, changePath string) (string, string, WatchableDirectory, bool) {
+	directories, ok := w.directories.directories[dirPath]
+	if ok {
+		return dirPath, changePath, directories, true
+	}
+
+	normalizedDirPath := normalizePathForLookup(dirPath)
+	for candidateDirPath, directories := range w.directories.directories {
+		if normalizePathForLookup(candidateDirPath) != normalizedDirPath {
+			continue
+		}
+
+		return candidateDirPath, pathWithDirectoryStyle(candidateDirPath, dirPath, changePath), directories, true
+	}
+
+	return "", "", WatchableDirectory{}, false
+}
+
+func normalizePathForLookup(value string) string {
+	value = filepath.ToSlash(value)
+	return strings.ReplaceAll(value, "\\", "/")
+}
+
+func pathWithDirectoryStyle(targetDirPath string, sourceDirPath string, sourceFilePath string) string {
+	suffix := strings.TrimPrefix(sourceFilePath, sourceDirPath)
+	if strings.Contains(targetDirPath, "\\") {
+		suffix = strings.ReplaceAll(suffix, "/", "\\")
+	}
+	return targetDirPath + suffix
 }
 
 // If the changeId matches the current changeId, we propagate the events.
