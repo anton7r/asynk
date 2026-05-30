@@ -72,6 +72,8 @@ func TestParseAllCommandsUsesPlatformShellForShellCommands(t *testing.T) {
 		assert.Equal(t, "sh", cmds[0].executable)
 		assert.Equal(t, []string{"-c", `echo "hello"`}, cmds[0].args)
 	}
+
+	assert.False(t, cmds[0].resolveExecutableWithEnv)
 }
 
 func TestCommandWrapperRunAppliesCwdAndEnv(t *testing.T) {
@@ -133,11 +135,12 @@ func TestCommandWrapperRunResolvesExecutableFromTaskEnvPath(t *testing.T) {
 	require.NoError(t, err)
 
 	wrapper := &CommandWrapper{
-		executable: helperName,
-		args:       []string{"-test.run=TestCommandWrapperHelperProcess", "--", outputPath},
-		cwd:        dir,
-		taskId:     "task",
-		log:        zap.NewNop(),
+		executable:               helperName,
+		args:                     []string{"-test.run=TestCommandWrapperHelperProcess", "--", outputPath},
+		cwd:                      dir,
+		resolveExecutableWithEnv: true,
+		taskId:                   "task",
+		log:                      zap.NewNop(),
 	}
 
 	env := append(os.Environ(), "PATH=bin", "ASYNK_CMDWRAP_HELPER=1", "ASYNK_EXPECTED=path")
@@ -150,6 +153,37 @@ func TestCommandWrapperRunResolvesExecutableFromTaskEnvPath(t *testing.T) {
 	parts := strings.Split(string(output), "\n")
 	require.Len(t, parts, 3)
 	assert.Equal(t, "path", parts[0])
+}
+
+func TestCommandWrapperRunDoesNotResolveShellFromTaskEnvPath(t *testing.T) {
+	dir := t.TempDir()
+	outputPath := filepath.Join(dir, "shell-output.txt")
+	outputFile := filepath.Base(outputPath)
+
+	command := `printf "%s" "$ASYNK_SHELL_VALUE" > ` + outputFile
+	if runtime.GOOS == "windows" {
+		command = `echo %ASYNK_SHELL_VALUE%>` + outputFile
+	}
+
+	cmds, err := ParseAllCommands(
+		config.RunCommands{{Command: command, Shell: true}},
+		"task",
+		zap.NewNop(),
+		nil,
+		dir,
+		idgen.NewGenIDInterpolator(),
+	)
+	require.NoError(t, err)
+	require.Len(t, cmds, 1)
+	require.False(t, cmds[0].resolveExecutableWithEnv)
+
+	env := append(os.Environ(), "PATH=bin", "ASYNK_SHELL_VALUE=from-shell")
+	err = cmds[0].Run(context.Background(), env, NewWrapLogger([]string{"task"}))
+	require.NoError(t, err)
+
+	output, err := os.ReadFile(outputPath)
+	require.NoError(t, err)
+	assert.Equal(t, "from-shell", strings.TrimSpace(string(output)))
 }
 
 func TestCommandWrapperHelperProcess(t *testing.T) {

@@ -23,15 +23,16 @@ import (
 type Callback func(errored bool)
 
 type CommandWrapper struct {
-	taskId      string
-	executable  string
-	args        []string
-	cwd         string
-	cmd         *exec.Cmd
-	log         *zap.Logger
-	readCloser  io.ReadCloser
-	writeCloser io.WriteCloser
-	procMgr     ProcessManager
+	taskId                   string
+	executable               string
+	args                     []string
+	cwd                      string
+	resolveExecutableWithEnv bool
+	cmd                      *exec.Cmd
+	log                      *zap.Logger
+	readCloser               io.ReadCloser
+	writeCloser              io.WriteCloser
+	procMgr                  ProcessManager
 }
 
 func parseCommand(
@@ -61,13 +62,14 @@ func parseCommand(
 	procMgr.SetupProcessGroup(cmd)
 
 	return &CommandWrapper{
-		executable: executable,
-		args:       args,
-		cwd:        cwd,
-		cmd:        cmd,
-		taskId:     taskId,
-		log:        log,
-		procMgr:    procMgr,
+		executable:               executable,
+		args:                     args,
+		cwd:                      cwd,
+		resolveExecutableWithEnv: !command.Shell,
+		cmd:                      cmd,
+		taskId:                   taskId,
+		log:                      log,
+		procMgr:                  procMgr,
 	}, nil
 }
 
@@ -127,7 +129,9 @@ func (cmdWrap *CommandWrapper) Run(ctx context.Context, env []string, logWrap *W
 	cmdWrap.cmd = exec.CommandContext(ctx, cmdWrap.executable, cmdWrap.args...)
 	cmdWrap.cmd.Dir = cmdWrap.cwd
 	cmdWrap.cmd.Env = commandEnv(cmdWrap.cmd, env, cmdWrap.cwd)
-	cmdWrap.resolvePathFromEnv()
+	if cmdWrap.resolveExecutableWithEnv {
+		cmdWrap.resolvePathFromEnv()
+	}
 	cmdWrap.procMgr.SetupProcessGroup(cmdWrap.cmd)
 	cmdWrap.cmd.Cancel = func() error {
 		return cmdWrap.procMgr.CancelProcess(cmdWrap.cmd)
