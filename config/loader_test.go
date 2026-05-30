@@ -44,12 +44,12 @@ func TestLoadFromBytes_ValidConfig(t *testing.T) {
 	server := cfg.Tasks["server"]
 	assert.NotNil(t, server)
 	assert.Equal(t, TaskType_Continuous, server.Type)
-	assert.Equal(t, []string{"go run ./cmd/server"}, []string(server.Run))
+	assert.Equal(t, []string{"go run ./cmd/server"}, server.Run.LegacyStrings())
 
 	build := cfg.Tasks["build"]
 	assert.NotNil(t, build)
 	assert.Equal(t, TasKType_Build, build.Type)
-	assert.Equal(t, []string{"go build -o out ./cmd/app"}, []string(build.Run))
+	assert.Equal(t, []string{"go build -o out ./cmd/app"}, build.Run.LegacyStrings())
 }
 
 func TestLoadFromBytes_FillsTaskIds(t *testing.T) {
@@ -236,16 +236,16 @@ tasks:
 	assert.NoError(t, err)
 	assert.NotNil(t, cfg)
 	server := cfg.Tasks["server"]
-	assert.Equal(t, []string{"go run . -linux"}, []string(server.RunLinux))
-	assert.Equal(t, []string{"go run . -windows"}, []string(server.RunWindows))
-	assert.Equal(t, []string{"go run . -mac"}, []string(server.RunMac))
+	assert.Equal(t, []string{"go run . -linux"}, server.RunLinux.LegacyStrings())
+	assert.Equal(t, []string{"go run . -windows"}, server.RunWindows.LegacyStrings())
+	assert.Equal(t, []string{"go run . -mac"}, server.RunMac.LegacyStrings())
 }
 
 func TestFillTaskIds(t *testing.T) {
 	cfg := &Config{
 		Tasks: map[string]*TaskConfig{
-			"alpha": {Run: []string{"echo alpha"}},
-			"beta":  {Run: []string{"echo beta"}},
+			"alpha": {Run: NewLegacyRunCommands("echo alpha")},
+			"beta":  {Run: NewLegacyRunCommands("echo beta")},
 		},
 		CleanUpTasks: map[string]*CleanUpTaskConfig{
 			"cleanup-x": {Strategy: CleanUpStrategy_KeepLatest},
@@ -262,7 +262,7 @@ func TestFillTaskIds(t *testing.T) {
 func TestFillTaskIds_NilCleanUpTasks(t *testing.T) {
 	cfg := &Config{
 		Tasks: map[string]*TaskConfig{
-			"app": {Run: []string{"echo app"}},
+			"app": {Run: NewLegacyRunCommands("echo app")},
 		},
 		CleanUpTasks: nil,
 	}

@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"path/filepath"
 
 	"gopkg.in/yaml.v3"
 
@@ -28,13 +29,16 @@ const (
 )
 
 type TaskConfig struct {
-	Identifier string
+	Identifier string `yaml:"-"`
+	ConfigDir  string `yaml:"-"`
 	// Full command with arguments and options
-	Type       TaskType         `yaml:"type"`
-	Run        util.StringArray `yaml:"run"`
-	RunWindows util.StringArray `yaml:"run-windows"`
-	RunLinux   util.StringArray `yaml:"run-linux"`
-	RunMac     util.StringArray `yaml:"run-mac"`
+	Type       TaskType    `yaml:"type"`
+	Run        RunCommands `yaml:"run"`
+	RunWindows RunCommands `yaml:"run-windows"`
+	RunLinux   RunCommands `yaml:"run-linux"`
+	RunMac     RunCommands `yaml:"run-mac"`
+	Cwd        string      `yaml:"cwd"`
+	WorkingDir string      `yaml:"working-dir"`
 	// Glob pattern to match files to trigger the task
 	Include util.GlobArray `yaml:"include"`
 	// Glob pattern to exclude files from triggering the task
@@ -64,6 +68,7 @@ type SharedConfig struct {
 
 // The tasks id comes from the keys in the YAML file.
 type Config struct {
+	ConfigDir    string                        `yaml:"-"`
 	Shared       SharedConfig                  `yaml:"shared"`
 	Tasks        map[string]*TaskConfig        `yaml:"tasks"`
 	CleanUpTasks map[string]*CleanUpTaskConfig `yaml:"cleanup-tasks"`
@@ -89,13 +94,23 @@ func loadConfigFromYAML(filePath string, fs asynkutil.FileSystem) (*Config, erro
 		return nil, fmt.Errorf("error reading YAML file: %w", err)
 	}
 
-	return LoadFromBytes(data)
+	configDir, err := filepath.Abs(filepath.Dir(filePath))
+	if err != nil {
+		return nil, fmt.Errorf("error resolving config directory: %w", err)
+	}
+
+	return loadFromBytes(data, configDir)
 }
 
 // LoadFromBytes parses config from raw YAML bytes. Useful for testing
 // without needing a real file system.
 func LoadFromBytes(data []byte) (*Config, error) {
+	return loadFromBytes(data, "")
+}
+
+func loadFromBytes(data []byte, configDir string) (*Config, error) {
 	config := &Config{
+		ConfigDir: configDir,
 		Shared: SharedConfig{
 			Exclude:  util.NewGlobArray(),
 			LogLevel: "info",
@@ -121,6 +136,7 @@ func LoadFromBytes(data []byte) (*Config, error) {
 func fillTaskIds(config *Config) {
 	for taskId, taskConfig := range config.Tasks {
 		taskConfig.Identifier = taskId
+		taskConfig.ConfigDir = config.ConfigDir
 	}
 
 	for taskId, taskConfig := range config.CleanUpTasks {

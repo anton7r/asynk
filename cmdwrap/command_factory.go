@@ -1,6 +1,7 @@
 package cmdwrap
 
 import (
+	"github.com/anton7r/asynk/config"
 	"github.com/anton7r/asynk/util/interpolation/idgen"
 	"go.uber.org/zap"
 )
@@ -12,10 +13,11 @@ type CommandFactory interface {
 	// ParseAllCommands creates CommandWrappers for the given command strings.
 	// Returns nil if any command fails to interpolate.
 	ParseAllCommands(
-		commands []string,
+		commands config.RunCommands,
 		taskId string,
 		log *zap.Logger,
 		env map[string]string,
+		cwd string,
 		genIdInterpolator *idgen.GenIDInterpolator,
 	) []*CommandWrapper
 }
@@ -34,11 +36,12 @@ func NewDefaultCommandFactory(procMgr ProcessManager) *DefaultCommandFactory {
 }
 
 func (f *DefaultCommandFactory) ParseAllCommands(
-	commands []string,
+	commands config.RunCommands,
 	taskId string,
 	log *zap.Logger,
 	env map[string]string,
+	cwd string,
 	genIdInterpolator *idgen.GenIDInterpolator,
 ) []*CommandWrapper {
-	return ParseAllCommandsWithProcessManager(commands, taskId, log, env, genIdInterpolator, f.procMgr)
+	return ParseAllCommandsWithProcessManager(commands, taskId, log, env, cwd, genIdInterpolator, f.procMgr)
 }

@@ -16,12 +16,16 @@ shared:
   # trigger a reload of the running
   # asynk server
   reload-on-config-change: true
+  env-files:
+    - .env
 
 tasks:
   backend:
     # The task is a long running one, for example an application backend
     type: continuous
-    run: ./app.exe
+    cwd: .
+    run:
+      command: ./app.exe
     include: ^/app\.exe$
     dependencies:
       - backend-build-task
@@ -29,7 +33,9 @@ tasks:
   backend-build-task:
     # This task builds the backend application
     type: build
-    run: go build -o ./bin/app.exe
+    run:
+      command: go
+      args: [build, -o, ./bin/app.exe]
     include: ^/.*\.go$
     # This depends on the code generation task
     dependencies:
@@ -43,7 +49,7 @@ tasks:
     # With the multiline command support we try to reduce
     # the need for shell commands.
     run:
-      - ./scripts/generate_code_sql_types.sh
-      - echo hello
+      - command: ./scripts/generate_code_sql_types.sh
+      - command: echo
+        args: [hello]
     include: ^/schema/.*\.sql$
-  

@@ -9,7 +9,6 @@ import (
 
 	"github.com/anton7r/asynk/cmdwrap"
 	"github.com/anton7r/asynk/config"
-	configutil "github.com/anton7r/asynk/config/util"
 	"github.com/anton7r/asynk/task"
 	"github.com/anton7r/asynk/util"
 	"github.com/anton7r/asynk/util/interpolation/idgen"
@@ -51,18 +50,20 @@ type trackingCommandFactory struct {
 }
 
 type trackingFactoryCall struct {
-	commands []string
+	commands config.RunCommands
 	taskId   string
+	cwd      string
 }
 
 func (f *trackingCommandFactory) ParseAllCommands(
-	commands []string,
+	commands config.RunCommands,
 	taskId string,
 	log *zap.Logger,
 	env map[string]string,
+	cwd string,
 	genIdInterpolator *idgen.GenIDInterpolator,
 ) []*cmdwrap.CommandWrapper {
-	f.calls = append(f.calls, trackingFactoryCall{commands: commands, taskId: taskId})
+	f.calls = append(f.calls, trackingFactoryCall{commands: commands, taskId: taskId, cwd: cwd})
 	return []*cmdwrap.CommandWrapper{}
 }
 
@@ -79,9 +80,9 @@ func TestCrossPlatform_WindowsCommandsSelectedOnLinux(t *testing.T) {
 	taskCfg := &config.TaskConfig{
 		Identifier: "build",
 		Type:       config.TasKType_Build,
-		Run:        configutil.StringArray{"make build"},
-		RunWindows: configutil.StringArray{"msbuild.exe /p:Configuration=Release"},
-		RunLinux:   configutil.StringArray{"make build-linux"},
+		Run:        config.NewLegacyRunCommands("make build"),
+		RunWindows: config.NewLegacyRunCommands("msbuild.exe /p:Configuration=Release"),
+		RunLinux:   config.NewLegacyRunCommands("make build-linux"),
 	}
 
 	factory := &trackingCommandFactory{}
@@ -96,7 +97,7 @@ func TestCrossPlatform_WindowsCommandsSelectedOnLinux(t *testing.T) {
 	// with the Windows-specific commands
 	assert.NotNil(t, rt)
 	assert.Len(t, factory.calls, 1)
-	assert.Equal(t, []string{"msbuild.exe /p:Configuration=Release"}, factory.calls[0].commands)
+	assert.Equal(t, []string{"msbuild.exe /p:Configuration=Release"}, factory.calls[0].commands.LegacyStrings())
 	assert.Equal(t, "build", factory.calls[0].taskId)
 }
 
@@ -106,9 +107,9 @@ func TestCrossPlatform_LinuxCommandsSelectedOnLinux(t *testing.T) {
 	taskCfg := &config.TaskConfig{
 		Identifier: "build",
 		Type:       config.TasKType_Build,
-		Run:        configutil.StringArray{"make build"},
-		RunWindows: configutil.StringArray{"msbuild.exe /p:Configuration=Release"},
-		RunLinux:   configutil.StringArray{"make build-linux"},
+		Run:        config.NewLegacyRunCommands("make build"),
+		RunWindows: config.NewLegacyRunCommands("msbuild.exe /p:Configuration=Release"),
+		RunLinux:   config.NewLegacyRunCommands("make build-linux"),
 	}
 
 	factory := &trackingCommandFactory{}
@@ -121,7 +122,7 @@ func TestCrossPlatform_LinuxCommandsSelectedOnLinux(t *testing.T) {
 
 	assert.NotNil(t, rt)
 	assert.Len(t, factory.calls, 1)
-	assert.Equal(t, []string{"make build-linux"}, factory.calls[0].commands)
+	assert.Equal(t, []string{"make build-linux"}, factory.calls[0].commands.LegacyStrings())
 }
 
 func TestCrossPlatform_MacCommandsSelectedOnLinux(t *testing.T) {
@@ -130,10 +131,10 @@ func TestCrossPlatform_MacCommandsSelectedOnLinux(t *testing.T) {
 	taskCfg := &config.TaskConfig{
 		Identifier: "build",
 		Type:       config.TasKType_Build,
-		Run:        configutil.StringArray{"make build"},
-		RunWindows: configutil.StringArray{"msbuild.exe"},
-		RunLinux:   configutil.StringArray{"make build-linux"},
-		RunMac:     configutil.StringArray{"xcodebuild"},
+		Run:        config.NewLegacyRunCommands("make build"),
+		RunWindows: config.NewLegacyRunCommands("msbuild.exe"),
+		RunLinux:   config.NewLegacyRunCommands("make build-linux"),
+		RunMac:     config.NewLegacyRunCommands("xcodebuild"),
 	}
 
 	factory := &trackingCommandFactory{}
@@ -146,7 +147,7 @@ func TestCrossPlatform_MacCommandsSelectedOnLinux(t *testing.T) {
 
 	assert.NotNil(t, rt)
 	assert.Len(t, factory.calls, 1)
-	assert.Equal(t, []string{"xcodebuild"}, factory.calls[0].commands)
+	assert.Equal(t, []string{"xcodebuild"}, factory.calls[0].commands.LegacyStrings())
 }
 
 func TestCrossPlatform_FallbackToGenericWhenNoPlatformSpecific(t *testing.T) {
@@ -156,7 +157,7 @@ func TestCrossPlatform_FallbackToGenericWhenNoPlatformSpecific(t *testing.T) {
 	taskCfg := &config.TaskConfig{
 		Identifier: "lint",
 		Type:       config.TasKType_Build,
-		Run:        configutil.StringArray{"golangci-lint run"},
+		Run:        config.NewLegacyRunCommands("golangci-lint run"),
 	}
 
 	factory := &trackingCommandFactory{}
@@ -169,7 +170,7 @@ func TestCrossPlatform_FallbackToGenericWhenNoPlatformSpecific(t *testing.T) {
 
 	assert.NotNil(t, rt)
 	assert.Len(t, factory.calls, 1)
-	assert.Equal(t, []string{"golangci-lint run"}, factory.calls[0].commands)
+	assert.Equal(t, []string{"golangci-lint run"}, factory.calls[0].commands.LegacyStrings())
 }
 
 // ============================================================
@@ -198,10 +199,11 @@ func TestCrossPlatform_WindowsProcessManagerUsedInCommandFactory(t *testing.T) {
 
 	genId := idgen.NewGenIDInterpolator()
 	cmds := factory.ParseAllCommands(
-		[]string{"echo hello"},
+		config.NewLegacyRunCommands("echo hello"),
 		"test-task",
 		zap.NewNop(),
 		nil,
+		"",
 		genId,
 	)
 
@@ -256,7 +258,7 @@ tasks:
 
 	// Factory should have been called with Windows commands
 	assert.Len(t, factory.calls, 1)
-	assert.Equal(t, []string{"msbuild.exe /p:Configuration=Release"}, factory.calls[0].commands)
+	assert.Equal(t, []string{"msbuild.exe /p:Configuration=Release"}, factory.calls[0].commands.LegacyStrings())
 	assert.Equal(t, "build", factory.calls[0].taskId)
 }
 
@@ -291,7 +293,7 @@ tasks:
 	runner.startScheduledTasks()
 
 	assert.Len(t, factory.calls, 1)
-	assert.Equal(t, []string{"make build-linux"}, factory.calls[0].commands)
+	assert.Equal(t, []string{"make build-linux"}, factory.calls[0].commands.LegacyStrings())
 }
 
 // ============================================================
@@ -403,7 +405,7 @@ tasks:
 	// Collect what was called (order may vary due to map iteration)
 	callsByTask := make(map[string][]string)
 	for _, call := range factory.calls {
-		callsByTask[call.taskId] = call.commands
+		callsByTask[call.taskId] = call.commands.LegacyStrings()
 	}
 
 	assert.Equal(t, []string{"msbuild.exe"}, callsByTask["build"])
@@ -418,10 +420,10 @@ func TestCrossPlatform_SamConfigDifferentPlatformsProduceDifferentCommands(t *te
 	taskCfg := &config.TaskConfig{
 		Identifier: "serve",
 		Type:       config.TaskType_Continuous,
-		Run:        configutil.StringArray{"./server"},
-		RunWindows: configutil.StringArray{"server.exe"},
-		RunLinux:   configutil.StringArray{"./server-linux"},
-		RunMac:     configutil.StringArray{"./server-mac"},
+		Run:        config.NewLegacyRunCommands("./server"),
+		RunWindows: config.NewLegacyRunCommands("server.exe"),
+		RunLinux:   config.NewLegacyRunCommands("./server-linux"),
+		RunMac:     config.NewLegacyRunCommands("./server-mac"),
 	}
 
 	platforms := map[string]struct {
@@ -446,7 +448,7 @@ func TestCrossPlatform_SamConfigDifferentPlatformsProduceDifferentCommands(t *te
 
 			assert.NotNil(t, rt, "RunningTask should be created for platform %s", name)
 			assert.Len(t, factory.calls, 1)
-			assert.Equal(t, tc.expected, factory.calls[0].commands,
+			assert.Equal(t, tc.expected, factory.calls[0].commands.LegacyStrings(),
 				"Platform %s should select correct commands", name)
 		})
 	}

@@ -2,8 +2,7 @@ package config
 
 import (
 	"fmt"
-
-	"github.com/anton7r/asynk/util"
+	"strings"
 )
 
 type validator struct {
@@ -35,10 +34,10 @@ func (v *validator) validateTaskId() error {
 
 func (v *validator) validateRunCommand() error {
 	for taskId, taskConfig := range v.config.Tasks {
-		runEmpty := util.Empty(taskConfig.Run)
-		runWindowsEmpty := util.Empty(taskConfig.RunWindows)
-		runLinuxEmpty := util.Empty(taskConfig.RunLinux)
-		runMacEmpty := util.Empty(taskConfig.RunMac)
+		runEmpty := taskConfig.Run.IsEmpty()
+		runWindowsEmpty := taskConfig.RunWindows.IsEmpty()
+		runLinuxEmpty := taskConfig.RunLinux.IsEmpty()
+		runMacEmpty := taskConfig.RunMac.IsEmpty()
 
 		if runEmpty &&
 			(runWindowsEmpty &&
@@ -53,7 +52,56 @@ func (v *validator) validateRunCommand() error {
 				!runMacEmpty) {
 			return fmt.Errorf("invalid task configuration, run command is duplicated, you have defined the global run command and the platform specific run commands: %s", taskId)
 		}
+
+		if err := validateRunCommands(taskId, taskConfig.Run); err != nil {
+			return err
+		}
+		if err := validateRunCommands(taskId, taskConfig.RunWindows); err != nil {
+			return err
+		}
+		if err := validateRunCommands(taskId, taskConfig.RunLinux); err != nil {
+			return err
+		}
+		if err := validateRunCommands(taskId, taskConfig.RunMac); err != nil {
+			return err
+		}
 	}
+	return nil
+}
+
+func validateRunCommands(taskId string, commands RunCommands) error {
+	for _, command := range commands {
+		if strings.TrimSpace(command.Command) == "" {
+			return fmt.Errorf("invalid task configuration, run command is empty: %s", taskId)
+		}
+
+		if command.Shell && len(command.Args) > 0 {
+			return fmt.Errorf("invalid task configuration, shell commands cannot define args: %s", taskId)
+		}
+	}
+
+	return nil
+}
+
+func (v *validator) validateWorkingDirectories() error {
+	for _, taskConfig := range v.config.Tasks {
+		cwd := strings.TrimSpace(taskConfig.Cwd)
+		workingDir := strings.TrimSpace(taskConfig.WorkingDir)
+
+		if cwd != "" && workingDir != "" && cwd != workingDir {
+			return fmt.Errorf(
+				"invalid task configuration, cwd and working-dir have different values: %s",
+				taskConfig.Identifier,
+			)
+		}
+
+		if cwd == "" {
+			taskConfig.Cwd = workingDir
+		} else {
+			taskConfig.Cwd = cwd
+		}
+	}
+
 	return nil
 }
 
@@ -104,6 +152,7 @@ func validateConfig(config *Config) error {
 
 	validationSteps := []func() error{
 		validator.validateTaskId,
+		validator.validateWorkingDirectories,
 		validator.validateRunCommand,
 		validator.validateTaskTypes,
 		validator.validateDependencies,

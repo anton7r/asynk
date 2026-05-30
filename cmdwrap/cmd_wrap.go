@@ -6,8 +6,9 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
-	"strings"
 
+	"github.com/anton7r/asynk/config"
+	"github.com/anton7r/asynk/util"
 	envUtil "github.com/anton7r/asynk/util/interpolation/env"
 	"github.com/anton7r/asynk/util/interpolation/idgen"
 	"github.com/anton7r/asynk/util/interpolation/newestfile"
@@ -19,6 +20,9 @@ type Callback func(errored bool)
 
 type CommandWrapper struct {
 	taskId      string
+	executable  string
+	args        []string
+	cwd         string
 	cmd         *exec.Cmd
 	log         *zap.Logger
 	readCloser  io.ReadCloser
@@ -26,35 +30,101 @@ type CommandWrapper struct {
 	procMgr     ProcessManager
 }
 
-func parseCommand(command string, taskId string, log *zap.Logger, procMgr ProcessManager) *CommandWrapper {
-	// Split the command with its arguments
-	commandParts := strings.Split(command, " ")
-
-	// This should never happen, but just in case it does, log an error and return nil
-	if len(commandParts) < 1 {
-		return nil
+func parseCommand(
+	command config.CommandConfig,
+	taskId string,
+	cwd string,
+	env map[string]string,
+	genIdInterpolator *idgen.GenIDInterpolator,
+	log *zap.Logger,
+	procMgr ProcessManager,
+) (*CommandWrapper, error) {
+	if procMgr == nil {
+		procMgr = DefaultProcessManager()
 	}
 
-	var cmd *exec.Cmd
-
-	if len(commandParts) > 1 {
-		cmd = exec.Command(commandParts[0], commandParts[1:]...)
-	} else {
-		cmd = exec.Command(commandParts[0])
+	executable, args, err := resolveCommand(command, env, genIdInterpolator)
+	if err != nil {
+		return nil, err
 	}
 
-	// Place the process in its own process group so we can kill the entire tree
+	if executable == "" {
+		return nil, fmt.Errorf("command is empty")
+	}
+
+	cmd := exec.Command(executable, args...)
+	cmd.Dir = cwd
 	procMgr.SetupProcessGroup(cmd)
 
 	return &CommandWrapper{
-		cmd:     cmd,
-		taskId:  taskId,
-		log:     log,
-		procMgr: procMgr,
+		executable: executable,
+		args:       args,
+		cwd:        cwd,
+		cmd:        cmd,
+		taskId:     taskId,
+		log:        log,
+		procMgr:    procMgr,
+	}, nil
+}
+
+func resolveCommand(command config.CommandConfig, env map[string]string, genIdInterpolator *idgen.GenIDInterpolator) (string, []string, error) {
+	interpolatedCommand, err := interpolateCommandValue(command.Command, env, genIdInterpolator)
+	if err != nil {
+		return "", nil, err
 	}
+
+	if command.Shell {
+		if util.IsWindows() {
+			return "cmd.exe", []string{"/C", interpolatedCommand}, nil
+		}
+
+		return "sh", []string{"-c", interpolatedCommand}, nil
+	}
+
+	if command.Legacy {
+		commandParts, err := splitShellFields(interpolatedCommand)
+		if err != nil {
+			return "", nil, err
+		}
+
+		if len(commandParts) == 0 {
+			return "", nil, fmt.Errorf("command is empty")
+		}
+
+		return commandParts[0], commandParts[1:], nil
+	}
+
+	args := make([]string, len(command.Args))
+	for i, arg := range command.Args {
+		args[i], err = interpolateCommandValue(arg, env, genIdInterpolator)
+		if err != nil {
+			return "", nil, err
+		}
+	}
+
+	return interpolatedCommand, args, nil
+}
+
+func interpolateCommandValue(value string, env map[string]string, genIdInterpolator *idgen.GenIDInterpolator) (string, error) {
+	interpolated := envUtil.InterpolateEnvVariables(value, env)
+	interpolated, err := genIdInterpolator.Interpolate(interpolated)
+	if err != nil {
+		return "", err
+	}
+
+	return newestfile.Interpolate(interpolated), nil
 }
 
 func (cmdWrap *CommandWrapper) Run(ctx context.Context, env []string, logWrap *WrapLogger) error {
+	if cmdWrap.procMgr == nil {
+		cmdWrap.procMgr = DefaultProcessManager()
+	}
+
+	cmdWrap.cmd = exec.CommandContext(ctx, cmdWrap.executable, cmdWrap.args...)
+	cmdWrap.cmd.Dir = cmdWrap.cwd
+	cmdWrap.cmd.Env = env
+	cmdWrap.procMgr.SetupProcessGroup(cmdWrap.cmd)
+
 	err := cmdWrap.setupPipes()
 	if err != nil {
 		return fmt.Errorf("error setting up pipes for task %s: %v", cmdWrap.taskId, err)
@@ -62,7 +132,6 @@ func (cmdWrap *CommandWrapper) Run(ctx context.Context, env []string, logWrap *W
 
 	cmdWrap.readOutput(logWrap)
 
-	cmdWrap.cmd.Env = append(cmdWrap.cmd.Env, env...)
 	if err := cmdWrap.start(); err != nil {
 		return fmt.Errorf("error starting task %s: %v", cmdWrap.taskId, err)
 	}
@@ -79,11 +148,26 @@ func (cmdWrap *CommandWrapper) Run(ctx context.Context, env []string, logWrap *W
 	case err := <-wait:
 		return err
 	}
-
 }
 
 func (cmdWrap *CommandWrapper) Cancel() error {
+	if cmdWrap.procMgr == nil {
+		cmdWrap.procMgr = DefaultProcessManager()
+	}
+
 	return cmdWrap.procMgr.CancelProcess(cmdWrap.cmd)
+}
+
+func (cmdWrap *CommandWrapper) Executable() string {
+	return cmdWrap.executable
+}
+
+func (cmdWrap *CommandWrapper) Args() []string {
+	return append([]string(nil), cmdWrap.args...)
+}
+
+func (cmdWrap *CommandWrapper) Cwd() string {
+	return cmdWrap.cwd
 }
 
 func (cmdWrap *CommandWrapper) setupPipes() error {
@@ -123,7 +207,7 @@ func (cmdWrap *CommandWrapper) wait() error {
 
 	if err != nil {
 		if _, ok := err.(*exec.ExitError); ok {
-			// If it's an ExitError, we'll omit the "exit status 1" message
+			// If it's an ExitError, we'll omit the "exit status 1" message.
 			return fmt.Errorf("task '%s' failed to complete successfully", cmdWrap.taskId)
 		}
 		return fmt.Errorf("error occurred when waiting for task '%s' to complete: %v", cmdWrap.taskId, err)
@@ -146,20 +230,22 @@ func (cmdWrap *CommandWrapper) readOutput(wrapLog *WrapLogger) {
 }
 
 func ParseAllCommands(
-	commands []string,
+	commands config.RunCommands,
 	taskId string,
 	log *zap.Logger,
 	env map[string]string,
+	cwd string,
 	genIdInterpolator *idgen.GenIDInterpolator,
 ) []*CommandWrapper {
-	return ParseAllCommandsWithProcessManager(commands, taskId, log, env, genIdInterpolator, DefaultProcessManager())
+	return ParseAllCommandsWithProcessManager(commands, taskId, log, env, cwd, genIdInterpolator, DefaultProcessManager())
 }
 
 func ParseAllCommandsWithProcessManager(
-	commands []string,
+	commands config.RunCommands,
 	taskId string,
 	log *zap.Logger,
 	env map[string]string,
+	cwd string,
 	genIdInterpolator *idgen.GenIDInterpolator,
 	procMgr ProcessManager,
 ) []*CommandWrapper {
@@ -170,24 +256,15 @@ func ParseAllCommandsWithProcessManager(
 	cmds := []*CommandWrapper{}
 
 	for i, command := range commands {
-		log.Debug("Parsing command", zap.Int("index", i), zap.String("command", command))
+		log.Debug("Parsing command", zap.Int("index", i), zap.String("command", command.Command))
 
-		interpolatedCommand := envUtil.InterpolateEnvVariables(command, env)
-		interpolatedCommand, err := genIdInterpolator.Interpolate(interpolatedCommand)
-		if err != nil {
-			log.Error("Error interpolating command", zap.String("command", command), zap.Error(err))
-			return nil
-		}
-		interpolatedCommand = newestfile.Interpolate(interpolatedCommand)
-
-		cmdWrap := parseCommand(interpolatedCommand, taskId, log, procMgr)
+		cmdWrap, err := parseCommand(command, taskId, cwd, env, genIdInterpolator, log, procMgr)
 		if cmdWrap != nil {
 			cmds = append(cmds, cmdWrap)
 		} else {
-			log.Warn("Invalid command to run", zap.Int("index", i), zap.String("command", command))
+			log.Warn("Invalid command to run", zap.Int("index", i), zap.String("command", command.Command), zap.Error(err))
 		}
 	}
 
 	return cmds
-
 }

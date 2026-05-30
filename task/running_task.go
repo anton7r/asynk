@@ -2,6 +2,8 @@ package task
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/anton7r/asynk/cmdwrap"
@@ -23,6 +25,8 @@ type RunningTask struct {
 	cancel         context.CancelFunc
 	cmds           []*cmdwrap.CommandWrapper
 	localEnv       []string
+	env            map[string]string
+	cwd            string
 	log            *zap.Logger
 	wrapLogger     *cmdwrap.WrapLogger
 	onTaskFinished TaskCompletionCallback
@@ -63,20 +67,27 @@ func NewRunningTaskWithFactory(
 		cmdFactory = cmdwrap.NewDefaultCommandFactory(cmdwrap.DefaultProcessManager())
 	}
 
-	localEnv := envUtil.InterpolateEnvVariablesList(taskConfig.Env, globalEnv)
+	env := MergeEnv(os.Environ(), globalEnv, taskConfig.Env)
+	localEnv := EnvMapToList(env)
+	cwd, err := resolveCwd(taskConfig, env)
+	if err != nil {
+		log.Error("Error resolving task cwd", zap.String("taskId", taskConfig.Identifier), zap.Error(err))
+		return nil
+	}
+
 	taskId := taskConfig.Identifier
 	genId := idgen.NewGenIDInterpolator()
 
 	run := getCommands(taskConfig, log, platform)
 
 	log.Debug("Initializing task", zap.String("taskId", taskId))
-	if util.Empty(run) {
+	if run.IsEmpty() {
 		log.Debug("No command found for task", zap.String("taskId", taskId))
 		return nil
 	}
 
 	// This operation could as well be done later on when executing the command
-	cmds := cmdFactory.ParseAllCommands(run, taskId, log, globalEnv, genId)
+	cmds := cmdFactory.ParseAllCommands(run, taskId, log, env, cwd, genId)
 
 	ctx, cancel := initializeContext()
 
@@ -86,6 +97,8 @@ func NewRunningTaskWithFactory(
 		cancel:         cancel,
 		cmds:           cmds,
 		localEnv:       localEnv,
+		env:            env,
+		cwd:            cwd,
 		log:            log,
 		wrapLogger:     wrapLogger,
 		onTaskFinished: onTaskFinished,
@@ -111,22 +124,22 @@ func getCommands(
 	tConfig *config.TaskConfig,
 	log *zap.Logger,
 	platform *util.Platform,
-) []string {
+) config.RunCommands {
 	if platform == nil {
 		platform = util.NewPlatform()
 	}
 
 	taskId := tConfig.Identifier
 
-	var run []string
+	var run config.RunCommands
 
-	if platform.IsWindows() && !util.Empty(tConfig.RunWindows) {
+	if platform.IsWindows() && !tConfig.RunWindows.IsEmpty() {
 		run = tConfig.RunWindows
-	} else if platform.IsLinux() && !util.Empty(tConfig.RunLinux) {
+	} else if platform.IsLinux() && !tConfig.RunLinux.IsEmpty() {
 		run = tConfig.RunLinux
-	} else if platform.IsMac() && !util.Empty(tConfig.RunMac) {
+	} else if platform.IsMac() && !tConfig.RunMac.IsEmpty() {
 		run = tConfig.RunMac
-	} else if !util.Empty(tConfig.Run) {
+	} else if !tConfig.Run.IsEmpty() {
 		run = tConfig.Run
 	} else {
 		log.Debug("No command found for task", zap.String("taskId", taskId))
@@ -134,6 +147,28 @@ func getCommands(
 	}
 
 	return run
+}
+
+func resolveCwd(taskConfig *config.TaskConfig, env map[string]string) (string, error) {
+	if taskConfig.Cwd == "" {
+		return "", nil
+	}
+
+	cwd := envUtil.InterpolateEnvVariables(taskConfig.Cwd, env)
+	if filepath.IsAbs(cwd) {
+		return filepath.Clean(cwd), nil
+	}
+
+	baseDir := taskConfig.ConfigDir
+	if baseDir == "" {
+		var err error
+		baseDir, err = os.Getwd()
+		if err != nil {
+			return "", err
+		}
+	}
+
+	return filepath.Clean(filepath.Join(baseDir, cwd)), nil
 }
 
 func (r *RunningTask) Start() {
