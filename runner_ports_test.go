@@ -155,3 +155,69 @@ tasks:
 	assert.True(t, runner.shouldRestartOnProviderChange(runner.Config.Tasks["direct-frontend"].Consumes[0]))
 	assert.False(t, runner.shouldRestartOnProviderChange(runner.Config.Tasks["proxy-frontend"].Consumes[0]))
 }
+
+func TestShouldRestartOnProviderChange_DefaultsToDirectForDirectExports(t *testing.T) {
+	checker := &runnerPortChecker{unavailable: map[int]bool{}}
+	runner := testRunnerForPorts(t, `
+tasks:
+  backend:
+    type: continuous
+    run: "go run . --port ${PORT}"
+    port:
+      preferred: 3000
+      range:
+        start: 3000
+        end: 3002
+      expose:
+        proxy:
+          enabled: true
+          preferred: 8080
+  url-frontend:
+    type: continuous
+    run: "npm run dev"
+    consumes:
+      - task: backend
+        env:
+          VITE_API_URL: url
+  port-frontend:
+    type: continuous
+    run: "npm run dev"
+    consumes:
+      - task: backend
+        env:
+          API_PORT: port
+`, checker)
+
+	assert.True(t, runner.shouldRestartOnProviderChange(runner.Config.Tasks["url-frontend"].Consumes[0]))
+	assert.True(t, runner.shouldRestartOnProviderChange(runner.Config.Tasks["port-frontend"].Consumes[0]))
+}
+
+func TestReleaseTaskPorts_ClearsDirectExportsForConsumers(t *testing.T) {
+	checker := &runnerPortChecker{unavailable: map[int]bool{}}
+	runner := testRunnerForPorts(t, `
+tasks:
+  backend:
+    type: continuous
+    run: "go run . --port ${PORT}"
+    port:
+      preferred: 3000
+      range:
+        start: 3000
+        end: 3002
+  frontend:
+    type: continuous
+    run: "npm run dev"
+    consumes:
+      - task: backend
+        env:
+          VITE_API_URL: url
+`, checker)
+
+	_, _, _, err := runner.prepareTaskForStart(runner.Config.Tasks["backend"])
+	require.NoError(t, err)
+	assert.True(t, runner.canStartTask(&ScheduledTask{TaskConfiguration: runner.Config.Tasks["frontend"]}))
+
+	runner.releaseTaskPorts("backend")
+
+	assert.False(t, runner.canStartTask(&ScheduledTask{TaskConfiguration: runner.Config.Tasks["frontend"]}))
+}

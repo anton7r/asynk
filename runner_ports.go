@@ -166,6 +166,34 @@ func (runner *Runner) setServiceExports(taskID string, exports map[string]string
 func (runner *Runner) releaseTaskPorts(taskID string) {
 	runner.portManager.Release(taskID)
 	runner.proxyManager.UpdateTarget(taskID, "")
+	runner.clearDirectServiceExports(taskID)
+}
+
+func (runner *Runner) clearDirectServiceExports(taskID string) {
+	runner.serviceExportMutex.Lock()
+	defer runner.serviceExportMutex.Unlock()
+
+	exports := runner.serviceExports[taskID]
+	if exports == nil {
+		return
+	}
+
+	delete(exports, string(config.ConsumeExport_Port))
+	delete(exports, string(config.ConsumeExport_URL))
+
+	serviceName := taskID
+	if taskConfig := runner.Config.Tasks[taskID]; taskConfig != nil &&
+		taskConfig.Port != nil &&
+		taskConfig.Port.Expose != nil &&
+		taskConfig.Port.Expose.Name != "" {
+		serviceName = taskConfig.Port.Expose.Name
+	}
+	delete(exports, exportEnvName(serviceName, "PORT"))
+	delete(exports, exportEnvName(serviceName, "URL"))
+
+	if len(exports) == 0 {
+		delete(runner.serviceExports, taskID)
+	}
 }
 
 func (runner *Runner) closeManagedProxies() {
@@ -209,7 +237,7 @@ func (runner *Runner) shouldRestartOnProviderChange(consume config.ConsumeConfig
 	provider := runner.Config.Tasks[consume.Task]
 	mode := consume.Mode
 	if mode == "" {
-		if providerHasProxy(provider) {
+		if consumeUsesOnlyProxyExports(consume) && providerHasProxy(provider) {
 			mode = config.ConsumeMode_Proxy
 		} else {
 			mode = config.ConsumeMode_Direct
@@ -217,6 +245,19 @@ func (runner *Runner) shouldRestartOnProviderChange(consume config.ConsumeConfig
 	}
 
 	return mode == config.ConsumeMode_Direct
+}
+
+func consumeUsesOnlyProxyExports(consume config.ConsumeConfig) bool {
+	if len(consume.Env) == 0 {
+		return false
+	}
+
+	for _, exportName := range consume.Env {
+		if config.ConsumeExport(exportName) != config.ConsumeExport_ProxyURL {
+			return false
+		}
+	}
+	return true
 }
 
 func cloneTaskConfig(taskConfig *config.TaskConfig) *config.TaskConfig {
