@@ -61,6 +61,11 @@ func (i *Instance) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	reverseProxy := httputil.NewSingleHostReverseProxy(targetURL)
+	director := reverseProxy.Director
+	reverseProxy.Director = func(req *http.Request) {
+		director(req)
+		req.Host = targetURL.Host
+	}
 	reverseProxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
 		http.Error(w, "proxy target unavailable", http.StatusServiceUnavailable)
 	}

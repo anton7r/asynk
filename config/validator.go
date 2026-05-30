@@ -181,6 +181,9 @@ func (v *validator) validatePortConfigs() error {
 		if proxy.Env != "" && !isValidEnvName(proxy.Env) {
 			return fmt.Errorf("invalid task configuration, proxy env is invalid for task '%s': %s", taskConfig.Identifier, proxy.Env)
 		}
+		if proxy.Env != "" && isReservedBuiltInExportName(proxy.Env) {
+			return fmt.Errorf("invalid task configuration, proxy env shadows reserved export for task '%s': %s", taskConfig.Identifier, proxy.Env)
+		}
 
 		if proxy.Preferred != 0 && !isValidPort(proxy.Preferred) {
 			return fmt.Errorf("invalid task configuration, preferred proxy port is invalid for task '%s': %d", taskConfig.Identifier, proxy.Preferred)
@@ -290,6 +293,15 @@ func isValidPort(port int) bool {
 
 func isValidEnvName(name string) bool {
 	return envNamePattern.MatchString(name)
+}
+
+func isReservedBuiltInExportName(name string) bool {
+	switch ConsumeExport(name) {
+	case ConsumeExport_Port, ConsumeExport_URL, ConsumeExport_ProxyURL:
+		return true
+	default:
+		return false
+	}
 }
 
 func validateConfig(config *Config) error {

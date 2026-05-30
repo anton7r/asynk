@@ -234,6 +234,10 @@ func (runner *Runner) shouldRestartOnProviderChange(consume config.ConsumeConfig
 		return false
 	}
 
+	if consumeUsesDirectExports(consume) {
+		return true
+	}
+
 	provider := runner.Config.Tasks[consume.Task]
 	mode := consume.Mode
 	if mode == "" {
@@ -245,6 +249,16 @@ func (runner *Runner) shouldRestartOnProviderChange(consume config.ConsumeConfig
 	}
 
 	return mode == config.ConsumeMode_Direct
+}
+
+func consumeUsesDirectExports(consume config.ConsumeConfig) bool {
+	for _, exportName := range consume.Env {
+		switch config.ConsumeExport(exportName) {
+		case config.ConsumeExport_Port, config.ConsumeExport_URL:
+			return true
+		}
+	}
+	return false
 }
 
 func consumeUsesOnlyProxyExports(consume config.ConsumeConfig) bool {

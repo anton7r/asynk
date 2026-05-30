@@ -192,6 +192,35 @@ tasks:
 	assert.True(t, runner.shouldRestartOnProviderChange(runner.Config.Tasks["port-frontend"].Consumes[0]))
 }
 
+func TestShouldRestartOnProviderChange_RestartsDirectExportsWithExplicitProxyMode(t *testing.T) {
+	checker := &runnerPortChecker{unavailable: map[int]bool{}}
+	runner := testRunnerForPorts(t, `
+tasks:
+  backend:
+    type: continuous
+    run: "go run . --port ${PORT}"
+    port:
+      preferred: 3000
+      range:
+        start: 3000
+        end: 3002
+      expose:
+        proxy:
+          enabled: true
+          preferred: 8080
+  frontend:
+    type: continuous
+    run: "npm run dev"
+    consumes:
+      - task: backend
+        mode: proxy
+        env:
+          VITE_API_URL: url
+`, checker)
+
+	assert.True(t, runner.shouldRestartOnProviderChange(runner.Config.Tasks["frontend"].Consumes[0]))
+}
+
 func TestReleaseTaskPorts_ClearsDirectExportsForConsumers(t *testing.T) {
 	checker := &runnerPortChecker{unavailable: map[int]bool{}}
 	runner := testRunnerForPorts(t, `

@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -74,6 +75,35 @@ func TestProxy_UpdatesTarget(t *testing.T) {
 	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
 	assert.Equal(t, "second", string(body))
+}
+
+func TestProxy_RewritesHostHeaderToTargetHost(t *testing.T) {
+	seenHost := make(chan string, 1)
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenHost <- r.Host
+		_, _ = io.WriteString(w, "backend")
+	}))
+	defer backend.Close()
+
+	targetURL, err := url.Parse(backend.URL)
+	require.NoError(t, err)
+
+	manager := NewManager()
+	defer manager.CloseAll()
+
+	proxyURL, err := manager.StartOrUpdate("backend", freePort(t), backend.URL)
+	require.NoError(t, err)
+
+	request, err := http.NewRequest(http.MethodGet, proxyURL, nil)
+	require.NoError(t, err)
+	request.Host = "frontend.local"
+
+	resp, err := http.DefaultClient.Do(request)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, targetURL.Host, <-seenHost)
 }
 
 func TestProxy_ReturnsServiceUnavailableWithoutTarget(t *testing.T) {

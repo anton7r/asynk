@@ -367,6 +367,29 @@ tasks:
 	assert.Contains(t, err.Error(), "does not expose a proxy")
 }
 
+func TestLoadFromBytes_PortConfigRejectsProxyEnvShadowingBuiltInExport(t *testing.T) {
+	yml := []byte(`
+tasks:
+  backend:
+    type: continuous
+    run: "go run ."
+    port:
+      range:
+        start: 3000
+        end: 3001
+      expose:
+        proxy:
+          enabled: true
+          env: port
+          preferred: 8080
+`)
+	cfg, err := LoadFromBytes(yml)
+	if assert.Error(t, err) {
+		assert.Contains(t, err.Error(), "proxy env shadows reserved export")
+	}
+	assert.Nil(t, cfg)
+}
+
 func TestFillTaskIds(t *testing.T) {
 	cfg := &Config{
 		Tasks: map[string]*TaskConfig{
