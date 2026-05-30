@@ -12,18 +12,23 @@ shared:
 tasks:
   go:
     type: build
+    cwd: .
     run:
-      - go build -o app
+      command: go
+      args: [build, -o, app]
     include: main.go
   test2:
     type: build
     run:
-      - echo Also from second task!
+      command: echo
+      args: ["Also from second task!"]
     include: app
     dependencies: [test]
   test:
     type: build
     run:
-      - echo Hello
-      - echo World!
+      - command: echo
+        args: [Hello]
+      - command: echo
+        args: [World!]
     include: app

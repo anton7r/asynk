@@ -24,6 +24,8 @@ dependency array.
 - Supports inclusion and exclusion of files with glob patterns.
 - Supports running commands asynchronously by default
 - You can decide which commands block the execution of other commands.
+- Supports per-task working directories.
+- Supports env files and per-task environment variables.
 
 ## Road to V1
 
@@ -54,6 +56,8 @@ shared:
     # Log level is by default set to "info".
     # It controls how verbose asynk's own logs are.
     log-level: info
+    # Values loaded from env files are available for interpolation and child processes.
+    env-files: [.env]
     # Excludes directories globally for all the configurations
     # For example if you want to ignore node_modules folder.
     # Supports glob patterns
@@ -66,7 +70,8 @@ tasks:
         # the task should be always running
         type: continuous
         # Run the application built by the 'go-build' task
-        run: ./bin/app
+        run:
+          command: ./bin/app
         # Watches for the binary changes
         include: bin/app
         # indicate that the completion of
@@ -79,11 +84,64 @@ tasks:
         # Here is it set to to build to indicate
         # that it should only run once after a file change
         type: build
-        # Run can be either a single command or a single command
-        run: go build -o ./bin/app
+        # Prefer command + args for predictable arguments and quoting.
+        run:
+          command: go
+          args: [build, -o, ./bin/app]
         # Watches for all go file changes under the project root
         include: **.go
 
+```
+
+### Task commands, working directories, and environment
+
+`run` can be a single command object or a list of command objects. Commands in a
+list run sequentially.
+
+```yaml
+tasks:
+  frontend:
+    type: continuous
+    cwd: ../client
+    env:
+      - VITE_API_URL=${API_URL}
+    run:
+      command: pnpm
+      args: [run, dev]
+
+  generate:
+    type: build
+    run:
+      - command: goose
+        args: [up]
+      - command: jet
+        args:
+          - -dsn=postgres://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT}/${DB_NAME}?sslmode=disable
+          - -path=./gen/jet/
+```
+
+`cwd` is resolved relative to the directory containing `asynk.yaml`.
+`working-dir` is also accepted as an alias for `cwd`.
+
+Child process environment values are merged in this order:
+
+```txt
+parent process env < shared env-files < per-task env
+```
+
+Legacy string commands remain supported:
+
+```yaml
+run: go build -o "./tmp bin/app.exe" .
+```
+
+For complex commands, prefer `command` + `args`. If shell features are required,
+opt in explicitly:
+
+```yaml
+run:
+  shell: true
+  command: cd ../client && pnpm run dev
 ```
 
 Once you have configured `asynk.yaml`, the next steps would be to run the following command inside of the same folder as `asynk.yaml`:

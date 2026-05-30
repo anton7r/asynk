@@ -22,19 +22,22 @@ import (
 // mockCommandFactory returns empty command slices so no real processes spawn.
 type mockCommandFactory struct {
 	called   bool
-	commands []string
+	commands config.RunCommands
+	cwd      string
 }
 
 func (m *mockCommandFactory) ParseAllCommands(
-	commands []string,
+	commands config.RunCommands,
 	taskId string,
 	log *zap.Logger,
 	env map[string]string,
+	cwd string,
 	genIdInterpolator *idgen.GenIDInterpolator,
-) []*cmdwrap.CommandWrapper {
+) ([]*cmdwrap.CommandWrapper, error) {
 	m.called = true
 	m.commands = commands
-	return []*cmdwrap.CommandWrapper{}
+	m.cwd = cwd
+	return []*cmdwrap.CommandWrapper{}, nil
 }
 
 // ============================================================
@@ -1038,7 +1041,7 @@ func TestScheduledTask_HoldsConfiguration(t *testing.T) {
 	taskCfg := &config.TaskConfig{
 		Identifier: "my-task",
 		Type:       config.TasKType_Build,
-		Run:        configutil.StringArray{"echo hello"},
+		Run:        config.NewLegacyRunCommands("echo hello"),
 	}
 
 	st := &ScheduledTask{TaskConfiguration: taskCfg}

@@ -1,6 +1,7 @@
 package env
 
 import (
+	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -63,6 +64,16 @@ func TestInterpolateEnvVariables_ValueWithSpecialChars(t *testing.T) {
 	env := map[string]string{"PATH": "/usr/local/bin:/usr/bin"}
 	result := InterpolateEnvVariables("${PATH}", env)
 	assert.Equal(t, "/usr/local/bin:/usr/bin", result)
+}
+
+func TestInterpolateEnvVariables_WindowsCaseInsensitiveLookup(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows environment keys are case-insensitive")
+	}
+
+	env := map[string]string{"Path": `C:\Windows\System32`}
+	result := InterpolateEnvVariables(`${PATH}`, env)
+	assert.Equal(t, `C:\Windows\System32`, result)
 }
 
 func TestInterpolateEnvVariables_AdjacentVariables(t *testing.T) {

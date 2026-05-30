@@ -2,6 +2,7 @@ package env
 
 import (
 	"regexp"
+	"runtime"
 	"strings"
 )
 
@@ -25,9 +26,24 @@ func InterpolateEnvVariablesList(input []string, env map[string]string) []string
 func InterpolateEnvVariables(input string, env map[string]string) string {
 	return envVarPattern.ReplaceAllStringFunc(input, func(match string) string {
 		key := strings.Trim(match[2:len(match)-1], " ")
-		if value, exists := env[key]; exists {
+		if value, exists := lookupEnvValue(env, key); exists {
 			return value
 		}
 		return match // Return the original pattern if the env variable is not found
 	})
+}
+
+func lookupEnvValue(env map[string]string, key string) (string, bool) {
+	value, exists := env[key]
+	if exists || runtime.GOOS != "windows" {
+		return value, exists
+	}
+
+	for envKey, envValue := range env {
+		if strings.EqualFold(envKey, key) {
+			return envValue, true
+		}
+	}
+
+	return "", false
 }

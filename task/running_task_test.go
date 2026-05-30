@@ -8,7 +8,6 @@ import (
 
 	"github.com/anton7r/asynk/cmdwrap"
 	"github.com/anton7r/asynk/config"
-	configutil "github.com/anton7r/asynk/config/util"
 	"github.com/anton7r/asynk/util"
 	"github.com/anton7r/asynk/util/interpolation/idgen"
 	"github.com/stretchr/testify/assert"
@@ -50,20 +49,23 @@ func newTaskConfig(id string) *config.TaskConfig {
 
 type mockCommandFactory struct {
 	called   bool
-	commands []string
+	commands config.RunCommands
+	cwd      string
 }
 
 func (m *mockCommandFactory) ParseAllCommands(
-	commands []string,
+	commands config.RunCommands,
 	taskId string,
 	log *zap.Logger,
 	env map[string]string,
+	cwd string,
 	genIdInterpolator *idgen.GenIDInterpolator,
-) []*cmdwrap.CommandWrapper {
+) ([]*cmdwrap.CommandWrapper, error) {
 	m.called = true
 	m.commands = commands
+	m.cwd = cwd
 	// Return an empty slice (non-nil) so the task is created
-	return []*cmdwrap.CommandWrapper{}
+	return []*cmdwrap.CommandWrapper{}, nil
 }
 
 // --- mock ProcessManager ---
@@ -84,13 +86,13 @@ func TestGetCommands_WindowsPlatform(t *testing.T) {
 	platform := &util.Platform{OS: "windows"}
 
 	tc := newTaskConfig("test-task")
-	tc.Run = configutil.StringArray{"echo fallback"}
-	tc.RunWindows = configutil.StringArray{"echo windows"}
-	tc.RunLinux = configutil.StringArray{"echo linux"}
-	tc.RunMac = configutil.StringArray{"echo mac"}
+	tc.Run = config.NewLegacyRunCommands("echo fallback")
+	tc.RunWindows = config.NewLegacyRunCommands("echo windows")
+	tc.RunLinux = config.NewLegacyRunCommands("echo linux")
+	tc.RunMac = config.NewLegacyRunCommands("echo mac")
 
 	result := getCommands(tc, log, platform)
-	assert.Equal(t, []string{"echo windows"}, []string(result))
+	assert.Equal(t, []string{"echo windows"}, result.LegacyStrings())
 }
 
 func TestGetCommands_LinuxPlatform(t *testing.T) {
@@ -98,13 +100,13 @@ func TestGetCommands_LinuxPlatform(t *testing.T) {
 	platform := &util.Platform{OS: "linux"}
 
 	tc := newTaskConfig("test-task")
-	tc.Run = configutil.StringArray{"echo fallback"}
-	tc.RunWindows = configutil.StringArray{"echo windows"}
-	tc.RunLinux = configutil.StringArray{"echo linux"}
-	tc.RunMac = configutil.StringArray{"echo mac"}
+	tc.Run = config.NewLegacyRunCommands("echo fallback")
+	tc.RunWindows = config.NewLegacyRunCommands("echo windows")
+	tc.RunLinux = config.NewLegacyRunCommands("echo linux")
+	tc.RunMac = config.NewLegacyRunCommands("echo mac")
 
 	result := getCommands(tc, log, platform)
-	assert.Equal(t, []string{"echo linux"}, []string(result))
+	assert.Equal(t, []string{"echo linux"}, result.LegacyStrings())
 }
 
 func TestGetCommands_MacPlatform(t *testing.T) {
@@ -112,13 +114,13 @@ func TestGetCommands_MacPlatform(t *testing.T) {
 	platform := &util.Platform{OS: "darwin"}
 
 	tc := newTaskConfig("test-task")
-	tc.Run = configutil.StringArray{"echo fallback"}
-	tc.RunWindows = configutil.StringArray{"echo windows"}
-	tc.RunLinux = configutil.StringArray{"echo linux"}
-	tc.RunMac = configutil.StringArray{"echo mac"}
+	tc.Run = config.NewLegacyRunCommands("echo fallback")
+	tc.RunWindows = config.NewLegacyRunCommands("echo windows")
+	tc.RunLinux = config.NewLegacyRunCommands("echo linux")
+	tc.RunMac = config.NewLegacyRunCommands("echo mac")
 
 	result := getCommands(tc, log, platform)
-	assert.Equal(t, []string{"echo mac"}, []string(result))
+	assert.Equal(t, []string{"echo mac"}, result.LegacyStrings())
 }
 
 func TestGetCommands_FallbackToRun(t *testing.T) {
@@ -127,11 +129,11 @@ func TestGetCommands_FallbackToRun(t *testing.T) {
 	platform := &util.Platform{OS: "linux"}
 
 	tc := newTaskConfig("test-task")
-	tc.Run = configutil.StringArray{"echo fallback"}
+	tc.Run = config.NewLegacyRunCommands("echo fallback")
 	// No platform-specific commands set
 
 	result := getCommands(tc, log, platform)
-	assert.Equal(t, []string{"echo fallback"}, []string(result))
+	assert.Equal(t, []string{"echo fallback"}, result.LegacyStrings())
 }
 
 func TestGetCommands_FallbackWhenPlatformSpecificEmpty(t *testing.T) {
@@ -139,11 +141,11 @@ func TestGetCommands_FallbackWhenPlatformSpecificEmpty(t *testing.T) {
 	platform := &util.Platform{OS: "windows"}
 
 	tc := newTaskConfig("test-task")
-	tc.Run = configutil.StringArray{"echo fallback"}
+	tc.Run = config.NewLegacyRunCommands("echo fallback")
 	// RunWindows is nil/empty, so should fall back to Run
 
 	result := getCommands(tc, log, platform)
-	assert.Equal(t, []string{"echo fallback"}, []string(result))
+	assert.Equal(t, []string{"echo fallback"}, result.LegacyStrings())
 }
 
 func TestGetCommands_ReturnsNilWhenNoCommands(t *testing.T) {
@@ -167,7 +169,7 @@ func TestNewRunningTask_ValidConfig(t *testing.T) {
 	wrapLogger := cmdwrap.NewWrapLogger([]string{"test-task"})
 
 	tc := newTaskConfig("test-task")
-	tc.Run = configutil.StringArray{echoCmd()}
+	tc.Run = config.NewLegacyRunCommands(echoCmd())
 
 	rt := NewRunningTask(tc, log, wrapLogger, nil, nopCallback, platform)
 	assert.NotNil(t, rt, "NewRunningTask should return a non-nil task for valid config")
@@ -196,12 +198,12 @@ func TestNewRunningTaskWithFactory_MockFactory(t *testing.T) {
 	factory := &mockCommandFactory{}
 
 	tc := newTaskConfig("factory-task")
-	tc.Run = configutil.StringArray{"echo hello", "echo world"}
+	tc.Run = config.NewLegacyRunCommands("echo hello", "echo world")
 
 	rt := NewRunningTaskWithFactory(tc, log, wrapLogger, nil, nopCallback, platform, factory)
 
 	assert.True(t, factory.called, "CommandFactory.ParseAllCommands should have been called")
-	assert.Equal(t, []string{"echo hello", "echo world"}, factory.commands)
+	assert.Equal(t, []string{"echo hello", "echo world"}, factory.commands.LegacyStrings())
 	assert.NotNil(t, rt)
 }
 
@@ -286,7 +288,7 @@ func TestRunningTask_StartAndWait(t *testing.T) {
 	wrapLogger := cmdwrap.NewWrapLogger([]string{"echo-task"})
 
 	tc := newTaskConfig("echo-task")
-	tc.Run = configutil.StringArray{echoCmd()}
+	tc.Run = config.NewLegacyRunCommands(echoCmd())
 
 	var mu sync.Mutex
 	var finishedTaskId string
@@ -317,7 +319,7 @@ func TestRunningTask_StartFailingCommand(t *testing.T) {
 	wrapLogger := cmdwrap.NewWrapLogger([]string{"fail-task"})
 
 	tc := newTaskConfig("fail-task")
-	tc.Run = configutil.StringArray{failCmd()} // exits with code 1
+	tc.Run = config.NewLegacyRunCommands(failCmd()) // exits with code 1
 
 	var mu sync.Mutex
 	var finishedWithError bool
@@ -337,6 +339,37 @@ func TestRunningTask_StartFailingCommand(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	assert.True(t, finishedWithError, "command 'false' should report an error")
+}
+
+func TestRunningTask_StartParseErrorFailsTask(t *testing.T) {
+	log := nopLogger()
+	platform := util.NewPlatform()
+	wrapLogger := cmdwrap.NewWrapLogger([]string{"parse-error-task"})
+
+	tc := newTaskConfig("parse-error-task")
+	tc.Run = config.NewLegacyRunCommands(`echo "oops`)
+
+	var mu sync.Mutex
+	var finishedTaskId string
+	var finishedWithError bool
+
+	callback := func(taskId string, errored bool) {
+		mu.Lock()
+		defer mu.Unlock()
+		finishedTaskId = taskId
+		finishedWithError = errored
+	}
+
+	rt := NewRunningTask(tc, log, wrapLogger, nil, callback, platform)
+	assert.NotNil(t, rt)
+
+	go rt.Start()
+	rt.Wait()
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, "parse-error-task", finishedTaskId)
+	assert.True(t, finishedWithError, "invalid command syntax should report an error")
 }
 
 // ============================================================
@@ -373,7 +406,7 @@ func TestNewRunningTaskWithFactory_NilCmdFactory(t *testing.T) {
 	wrapLogger := cmdwrap.NewWrapLogger([]string{"nil-factory-task"})
 
 	tc := newTaskConfig("nil-factory-task")
-	tc.Run = configutil.StringArray{echoCmd()}
+	tc.Run = config.NewLegacyRunCommands(echoCmd())
 
 	assert.NotPanics(t, func() {
 		rt := NewRunningTaskWithFactory(tc, log, wrapLogger, nil, nopCallback, platform, nil)
@@ -400,13 +433,13 @@ func TestGetCommands_NilPlatform(t *testing.T) {
 	log := nopLogger()
 
 	tc := newTaskConfig("nil-platform-task")
-	tc.Run = configutil.StringArray{"echo fallback"}
+	tc.Run = config.NewLegacyRunCommands("echo fallback")
 
 	assert.NotPanics(t, func() {
 		result := getCommands(tc, log, nil)
 		// Should still return the generic "run" command since nil defaults to NewPlatform()
 		assert.NotNil(t, result)
-		assert.Equal(t, []string{"echo fallback"}, []string(result))
+		assert.Equal(t, []string{"echo fallback"}, result.LegacyStrings())
 	})
 }
 
