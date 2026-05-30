@@ -5,7 +5,9 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 
@@ -125,6 +127,7 @@ func (cmdWrap *CommandWrapper) Run(ctx context.Context, env []string, logWrap *W
 	cmdWrap.cmd = exec.CommandContext(ctx, cmdWrap.executable, cmdWrap.args...)
 	cmdWrap.cmd.Dir = cmdWrap.cwd
 	cmdWrap.cmd.Env = commandEnv(cmdWrap.cmd, env, cmdWrap.cwd)
+	cmdWrap.resolvePathFromEnv()
 	cmdWrap.procMgr.SetupProcessGroup(cmdWrap.cmd)
 	cmdWrap.cmd.Cancel = func() error {
 		return cmdWrap.procMgr.CancelProcess(cmdWrap.cmd)
@@ -163,6 +166,17 @@ func (cmdWrap *CommandWrapper) Cancel() error {
 	return cmdWrap.procMgr.CancelProcess(cmdWrap.cmd)
 }
 
+func (cmdWrap *CommandWrapper) resolvePathFromEnv() {
+	path, err := lookPathWithEnv(cmdWrap.executable, cmdWrap.cmd.Env, cmdWrap.cwd)
+	if err != nil {
+		cmdWrap.cmd.Err = err
+		return
+	}
+
+	cmdWrap.cmd.Path = path
+	cmdWrap.cmd.Err = nil
+}
+
 func commandEnv(cmd *exec.Cmd, env []string, cwd string) []string {
 	if cwd == "" {
 		return env
@@ -198,6 +212,94 @@ func withPwdEnv(env []string, cwd string) []string {
 	}
 
 	return result
+}
+
+func lookPathWithEnv(file string, env []string, cwd string) (string, error) {
+	if hasPathSeparator(file) {
+		return file, nil
+	}
+
+	path, ok := envValue(env, "PATH")
+	if !ok {
+		path = os.Getenv("PATH")
+	}
+
+	for _, dir := range filepath.SplitList(path) {
+		if dir == "" {
+			dir = "."
+		}
+
+		if cwd != "" && !filepath.IsAbs(dir) {
+			dir = filepath.Join(cwd, dir)
+		}
+
+		for _, candidate := range executableCandidates(file, env) {
+			fullPath := filepath.Join(dir, candidate)
+			if isExecutableFile(fullPath) {
+				return fullPath, nil
+			}
+		}
+	}
+
+	return "", fmt.Errorf("executable %q not found in task PATH", file)
+}
+
+func hasPathSeparator(file string) bool {
+	return filepath.Base(file) != file
+}
+
+func executableCandidates(file string, env []string) []string {
+	if runtime.GOOS != "windows" {
+		return []string{file}
+	}
+
+	candidates := []string{file}
+	if filepath.Ext(file) != "" {
+		return candidates
+	}
+
+	pathext, ok := envValue(env, "PATHEXT")
+	if !ok {
+		pathext = ".COM;.EXE;.BAT;.CMD"
+	}
+
+	for _, ext := range strings.Split(pathext, ";") {
+		if ext == "" {
+			continue
+		}
+
+		if !strings.HasPrefix(ext, ".") {
+			ext = "." + ext
+		}
+
+		candidates = append(candidates, file+ext)
+	}
+
+	return candidates
+}
+
+func isExecutableFile(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil || info.IsDir() {
+		return false
+	}
+
+	if runtime.GOOS == "windows" {
+		return true
+	}
+
+	return info.Mode()&0111 != 0
+}
+
+func envValue(env []string, key string) (string, bool) {
+	for i := len(env) - 1; i >= 0; i-- {
+		envKey, value, ok := strings.Cut(env[i], "=")
+		if ok && sameEnvKey(envKey, key) {
+			return value, true
+		}
+	}
+
+	return "", false
 }
 
 func sameEnvKey(a string, b string) bool {

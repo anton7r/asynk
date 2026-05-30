@@ -2,6 +2,7 @@ package task
 
 import (
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/anton7r/asynk/cmdwrap"
@@ -33,6 +34,21 @@ func TestMergeEnvUsesExpectedPrecedence(t *testing.T) {
 	assert.Equal(t, "parent", merged["PARENT_ONLY"])
 	assert.Equal(t, "file", merged["FILE_ONLY"])
 	assert.Equal(t, "parent-file-task", merged["TASK_ONLY"])
+}
+
+func TestMergeEnvInterpolatesWindowsKeysCaseInsensitively(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows environment keys are case-insensitive")
+	}
+
+	merged := MergeEnv(
+		[]string{`Path=C:\Windows\System32`},
+		nil,
+		[]string{`PATH=C:\tools;${PATH}`},
+	)
+
+	assert.Equal(t, `C:\tools;C:\Windows\System32`, merged["PATH"])
+	assert.NotContains(t, merged, "Path")
 }
 
 func TestNewRunningTaskUsesMergedEnvForCommandArgsAndCwd(t *testing.T) {

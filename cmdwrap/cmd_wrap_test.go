@@ -106,6 +106,52 @@ func TestCommandWrapperRunAppliesCwdAndEnv(t *testing.T) {
 	assert.Equal(t, filepath.Clean(dir), filepath.Clean(parts[2]))
 }
 
+func TestCommandWrapperRunResolvesExecutableFromTaskEnvPath(t *testing.T) {
+	if os.Getenv("ASYNK_CMDWRAP_HELPER") == "1" {
+		return
+	}
+
+	dir := t.TempDir()
+	binDir := filepath.Join(dir, "bin")
+	err := os.Mkdir(binDir, 0755)
+	require.NoError(t, err)
+
+	outputPath := filepath.Join(dir, "path-helper-output.txt")
+	executable, err := os.Executable()
+	require.NoError(t, err)
+
+	helperName := "asynk-helper"
+	helperFileName := helperName
+	if runtime.GOOS == "windows" {
+		helperFileName += ".exe"
+	}
+
+	helperBytes, err := os.ReadFile(executable)
+	require.NoError(t, err)
+	helperPath := filepath.Join(binDir, helperFileName)
+	err = os.WriteFile(helperPath, helperBytes, 0755)
+	require.NoError(t, err)
+
+	wrapper := &CommandWrapper{
+		executable: helperName,
+		args:       []string{"-test.run=TestCommandWrapperHelperProcess", "--", outputPath},
+		cwd:        dir,
+		taskId:     "task",
+		log:        zap.NewNop(),
+	}
+
+	env := append(os.Environ(), "PATH=bin", "ASYNK_CMDWRAP_HELPER=1", "ASYNK_EXPECTED=path")
+	err = wrapper.Run(context.Background(), env, NewWrapLogger([]string{"task"}))
+	require.NoError(t, err)
+
+	output, err := os.ReadFile(outputPath)
+	require.NoError(t, err)
+
+	parts := strings.Split(string(output), "\n")
+	require.Len(t, parts, 3)
+	assert.Equal(t, "path", parts[0])
+}
+
 func TestCommandWrapperHelperProcess(t *testing.T) {
 	if os.Getenv("ASYNK_CMDWRAP_HELPER") != "1" {
 		return
