@@ -33,11 +33,11 @@ func (m *mockCommandFactory) ParseAllCommands(
 	env map[string]string,
 	cwd string,
 	genIdInterpolator *idgen.GenIDInterpolator,
-) []*cmdwrap.CommandWrapper {
+) ([]*cmdwrap.CommandWrapper, error) {
 	m.called = true
 	m.commands = commands
 	m.cwd = cwd
-	return []*cmdwrap.CommandWrapper{}
+	return []*cmdwrap.CommandWrapper{}, nil
 }
 
 // ============================================================

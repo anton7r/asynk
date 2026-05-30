@@ -24,6 +24,7 @@ type RunningTask struct {
 	ctx            context.Context
 	cancel         context.CancelFunc
 	cmds           []*cmdwrap.CommandWrapper
+	parseErr       error
 	localEnv       []string
 	env            map[string]string
 	cwd            string
@@ -87,7 +88,10 @@ func NewRunningTaskWithFactory(
 	}
 
 	// This operation could as well be done later on when executing the command
-	cmds := cmdFactory.ParseAllCommands(run, taskId, log, env, cwd, genId)
+	cmds, parseErr := cmdFactory.ParseAllCommands(run, taskId, log, env, cwd, genId)
+	if parseErr != nil {
+		log.Error("Error parsing task commands", zap.String("taskId", taskId), zap.Error(parseErr))
+	}
 
 	ctx, cancel := initializeContext()
 
@@ -96,6 +100,7 @@ func NewRunningTaskWithFactory(
 		ctx:            ctx,
 		cancel:         cancel,
 		cmds:           cmds,
+		parseErr:       parseErr,
 		localEnv:       localEnv,
 		env:            env,
 		cwd:            cwd,
@@ -176,6 +181,17 @@ func (r *RunningTask) Start() {
 
 	taskId := r.TaskId()
 	r.log.Info("Starting task", zap.String("taskId", taskId))
+
+	if r.parseErr != nil {
+		r.log.Error("Error executing command",
+			zap.String("taskId", taskId),
+			zap.Error(r.parseErr),
+		)
+
+		r.onTaskFinished(taskId, true)
+		r.cancel()
+		return
+	}
 
 	for i, cmd := range r.cmds {
 		err := cmd.Run(r.ctx, r.localEnv, r.wrapLogger)

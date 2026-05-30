@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"runtime"
+	"strings"
 
 	"github.com/anton7r/asynk/config"
 	"github.com/anton7r/asynk/util"
@@ -122,8 +124,11 @@ func (cmdWrap *CommandWrapper) Run(ctx context.Context, env []string, logWrap *W
 
 	cmdWrap.cmd = exec.CommandContext(ctx, cmdWrap.executable, cmdWrap.args...)
 	cmdWrap.cmd.Dir = cmdWrap.cwd
-	cmdWrap.cmd.Env = env
+	cmdWrap.cmd.Env = commandEnv(cmdWrap.cmd, env, cmdWrap.cwd)
 	cmdWrap.procMgr.SetupProcessGroup(cmdWrap.cmd)
+	cmdWrap.cmd.Cancel = func() error {
+		return cmdWrap.procMgr.CancelProcess(cmdWrap.cmd)
+	}
 
 	err := cmdWrap.setupPipes()
 	if err != nil {
@@ -156,6 +161,51 @@ func (cmdWrap *CommandWrapper) Cancel() error {
 	}
 
 	return cmdWrap.procMgr.CancelProcess(cmdWrap.cmd)
+}
+
+func commandEnv(cmd *exec.Cmd, env []string, cwd string) []string {
+	if cwd == "" {
+		return env
+	}
+
+	baseEnv := env
+	if baseEnv == nil {
+		baseEnv = cmd.Environ()
+	}
+
+	return withPwdEnv(baseEnv, cwd)
+}
+
+func withPwdEnv(env []string, cwd string) []string {
+	result := make([]string, 0, len(env)+1)
+	found := false
+
+	for _, entry := range env {
+		key, _, ok := strings.Cut(entry, "=")
+		if ok && sameEnvKey(key, "PWD") {
+			if !found {
+				result = append(result, "PWD="+cwd)
+				found = true
+			}
+			continue
+		}
+
+		result = append(result, entry)
+	}
+
+	if !found {
+		result = append(result, "PWD="+cwd)
+	}
+
+	return result
+}
+
+func sameEnvKey(a string, b string) bool {
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(a, b)
+	}
+
+	return a == b
 }
 
 func (cmdWrap *CommandWrapper) Executable() string {
@@ -236,7 +286,7 @@ func ParseAllCommands(
 	env map[string]string,
 	cwd string,
 	genIdInterpolator *idgen.GenIDInterpolator,
-) []*CommandWrapper {
+) ([]*CommandWrapper, error) {
 	return ParseAllCommandsWithProcessManager(commands, taskId, log, env, cwd, genIdInterpolator, DefaultProcessManager())
 }
 
@@ -248,7 +298,7 @@ func ParseAllCommandsWithProcessManager(
 	cwd string,
 	genIdInterpolator *idgen.GenIDInterpolator,
 	procMgr ProcessManager,
-) []*CommandWrapper {
+) ([]*CommandWrapper, error) {
 	if procMgr == nil {
 		procMgr = DefaultProcessManager()
 	}
@@ -259,12 +309,17 @@ func ParseAllCommandsWithProcessManager(
 		log.Debug("Parsing command", zap.Int("index", i), zap.String("command", command.Command))
 
 		cmdWrap, err := parseCommand(command, taskId, cwd, env, genIdInterpolator, log, procMgr)
-		if cmdWrap != nil {
-			cmds = append(cmds, cmdWrap)
-		} else {
+		if err != nil {
 			log.Warn("Invalid command to run", zap.Int("index", i), zap.String("command", command.Command), zap.Error(err))
+			return nil, fmt.Errorf("invalid command %d for task %s: %w", i, taskId, err)
 		}
+
+		if cmdWrap == nil {
+			return nil, fmt.Errorf("invalid command %d for task %s", i, taskId)
+		}
+
+		cmds = append(cmds, cmdWrap)
 	}
 
-	return cmds
+	return cmds, nil
 }

@@ -28,7 +28,8 @@ func TestParseAllCommandsPreservesStructuredArgs(t *testing.T) {
 		},
 	}
 
-	cmds := ParseAllCommands(commands, "task", zap.NewNop(), map[string]string{"NAME": "value with spaces"}, "workdir", idgen.NewGenIDInterpolator())
+	cmds, err := ParseAllCommands(commands, "task", zap.NewNop(), map[string]string{"NAME": "value with spaces"}, "workdir", idgen.NewGenIDInterpolator())
+	require.NoError(t, err)
 	require.Len(t, cmds, 1)
 
 	assert.Equal(t, "tool", cmds[0].executable)
@@ -44,7 +45,8 @@ func TestParseAllCommandsParsesLegacyStringsWithQuotes(t *testing.T) {
 		},
 	}
 
-	cmds := ParseAllCommands(commands, "task", zap.NewNop(), nil, "", idgen.NewGenIDInterpolator())
+	cmds, err := ParseAllCommands(commands, "task", zap.NewNop(), nil, "", idgen.NewGenIDInterpolator())
+	require.NoError(t, err)
 	require.Len(t, cmds, 1)
 
 	assert.Equal(t, "tool", cmds[0].executable)
@@ -59,7 +61,8 @@ func TestParseAllCommandsUsesPlatformShellForShellCommands(t *testing.T) {
 		},
 	}
 
-	cmds := ParseAllCommands(commands, "task", zap.NewNop(), map[string]string{"MESSAGE": "hello"}, "", idgen.NewGenIDInterpolator())
+	cmds, err := ParseAllCommands(commands, "task", zap.NewNop(), map[string]string{"MESSAGE": "hello"}, "", idgen.NewGenIDInterpolator())
+	require.NoError(t, err)
 	require.Len(t, cmds, 1)
 
 	if runtime.GOOS == "windows" {
@@ -89,7 +92,7 @@ func TestCommandWrapperRunAppliesCwdAndEnv(t *testing.T) {
 		log:        zap.NewNop(),
 	}
 
-	env := append(os.Environ(), "ASYNK_CMDWRAP_HELPER=1", "ASYNK_EXPECTED=value")
+	env := append(os.Environ(), "ASYNK_CMDWRAP_HELPER=1", "ASYNK_EXPECTED=value", "PWD=parent")
 	err = wrapper.Run(context.Background(), env, NewWrapLogger([]string{"task"}))
 	require.NoError(t, err)
 
@@ -97,9 +100,10 @@ func TestCommandWrapperRunAppliesCwdAndEnv(t *testing.T) {
 	require.NoError(t, err)
 
 	parts := strings.Split(string(output), "\n")
-	require.Len(t, parts, 2)
+	require.Len(t, parts, 3)
 	assert.Equal(t, "value", parts[0])
 	assert.Equal(t, filepath.Clean(dir), filepath.Clean(parts[1]))
+	assert.Equal(t, filepath.Clean(dir), filepath.Clean(parts[2]))
 }
 
 func TestCommandWrapperHelperProcess(t *testing.T) {
@@ -124,7 +128,7 @@ func TestCommandWrapperHelperProcess(t *testing.T) {
 		os.Exit(2)
 	}
 
-	err = os.WriteFile(outputPath, []byte(os.Getenv("ASYNK_EXPECTED")+"\n"+cwd), 0644)
+	err = os.WriteFile(outputPath, []byte(os.Getenv("ASYNK_EXPECTED")+"\n"+cwd+"\n"+os.Getenv("PWD")), 0644)
 	if err != nil {
 		os.Exit(2)
 	}

@@ -60,12 +60,12 @@ func (m *mockCommandFactory) ParseAllCommands(
 	env map[string]string,
 	cwd string,
 	genIdInterpolator *idgen.GenIDInterpolator,
-) []*cmdwrap.CommandWrapper {
+) ([]*cmdwrap.CommandWrapper, error) {
 	m.called = true
 	m.commands = commands
 	m.cwd = cwd
 	// Return an empty slice (non-nil) so the task is created
-	return []*cmdwrap.CommandWrapper{}
+	return []*cmdwrap.CommandWrapper{}, nil
 }
 
 // --- mock ProcessManager ---
@@ -339,6 +339,37 @@ func TestRunningTask_StartFailingCommand(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	assert.True(t, finishedWithError, "command 'false' should report an error")
+}
+
+func TestRunningTask_StartParseErrorFailsTask(t *testing.T) {
+	log := nopLogger()
+	platform := util.NewPlatform()
+	wrapLogger := cmdwrap.NewWrapLogger([]string{"parse-error-task"})
+
+	tc := newTaskConfig("parse-error-task")
+	tc.Run = config.NewLegacyRunCommands(`echo "oops`)
+
+	var mu sync.Mutex
+	var finishedTaskId string
+	var finishedWithError bool
+
+	callback := func(taskId string, errored bool) {
+		mu.Lock()
+		defer mu.Unlock()
+		finishedTaskId = taskId
+		finishedWithError = errored
+	}
+
+	rt := NewRunningTask(tc, log, wrapLogger, nil, callback, platform)
+	assert.NotNil(t, rt)
+
+	go rt.Start()
+	rt.Wait()
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, "parse-error-task", finishedTaskId)
+	assert.True(t, finishedWithError, "invalid command syntax should report an error")
 }
 
 // ============================================================

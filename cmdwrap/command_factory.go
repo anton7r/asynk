@@ -11,7 +11,7 @@ import (
 // controllable commands instead of spawning real OS processes.
 type CommandFactory interface {
 	// ParseAllCommands creates CommandWrappers for the given command strings.
-	// Returns nil if any command fails to interpolate.
+	// Returns an error if any command fails to parse or interpolate.
 	ParseAllCommands(
 		commands config.RunCommands,
 		taskId string,
@@ -19,7 +19,7 @@ type CommandFactory interface {
 		env map[string]string,
 		cwd string,
 		genIdInterpolator *idgen.GenIDInterpolator,
-	) []*CommandWrapper
+	) ([]*CommandWrapper, error)
 }
 
 // DefaultCommandFactory creates real OS process commands using a ProcessManager.
@@ -42,6 +42,6 @@ func (f *DefaultCommandFactory) ParseAllCommands(
 	env map[string]string,
 	cwd string,
 	genIdInterpolator *idgen.GenIDInterpolator,
-) []*CommandWrapper {
+) ([]*CommandWrapper, error) {
 	return ParseAllCommandsWithProcessManager(commands, taskId, log, env, cwd, genIdInterpolator, f.procMgr)
 }

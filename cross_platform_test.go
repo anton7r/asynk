@@ -62,9 +62,9 @@ func (f *trackingCommandFactory) ParseAllCommands(
 	env map[string]string,
 	cwd string,
 	genIdInterpolator *idgen.GenIDInterpolator,
-) []*cmdwrap.CommandWrapper {
+) ([]*cmdwrap.CommandWrapper, error) {
 	f.calls = append(f.calls, trackingFactoryCall{commands: commands, taskId: taskId, cwd: cwd})
-	return []*cmdwrap.CommandWrapper{}
+	return []*cmdwrap.CommandWrapper{}, nil
 }
 
 // ============================================================
@@ -198,7 +198,7 @@ func TestCrossPlatform_WindowsProcessManagerUsedInCommandFactory(t *testing.T) {
 	factory := cmdwrap.NewDefaultCommandFactory(winPM)
 
 	genId := idgen.NewGenIDInterpolator()
-	cmds := factory.ParseAllCommands(
+	cmds, err := factory.ParseAllCommands(
 		config.NewLegacyRunCommands("echo hello"),
 		"test-task",
 		zap.NewNop(),
@@ -207,6 +207,7 @@ func TestCrossPlatform_WindowsProcessManagerUsedInCommandFactory(t *testing.T) {
 		genId,
 	)
 
+	assert.NoError(t, err)
 	assert.NotNil(t, cmds)
 	assert.Len(t, cmds, 1)
 	// The Windows PM's SetupProcessGroup should have been called

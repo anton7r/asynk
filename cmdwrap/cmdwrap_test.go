@@ -2,7 +2,9 @@ package cmdwrap
 
 import (
 	"context"
+	"os/exec"
 	"runtime"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -45,6 +47,23 @@ func TestDefaultProcessManagerReturnsNonNil(t *testing.T) {
 	assert.NotNil(t, pm)
 }
 
+type recordingProcessManager struct {
+	setupCalled  atomic.Bool
+	cancelCalled atomic.Bool
+}
+
+func (m *recordingProcessManager) SetupProcessGroup(cmd *exec.Cmd) {
+	m.setupCalled.Store(true)
+}
+
+func (m *recordingProcessManager) CancelProcess(cmd *exec.Cmd) error {
+	m.cancelCalled.Store(true)
+	if cmd != nil && cmd.Process != nil {
+		_ = cmd.Process.Kill()
+	}
+	return nil
+}
+
 // --- CommandFactory interface ---
 
 func TestDefaultCommandFactoryCreatesCommands(t *testing.T) {
@@ -54,7 +73,8 @@ func TestDefaultCommandFactoryCreatesCommands(t *testing.T) {
 
 	log := zap.NewNop()
 	interp := idgen.NewGenIDInterpolator()
-	cmds := factory.ParseAllCommands(config.NewLegacyRunCommands(echoCmd()), "test-task", log, nil, "", interp)
+	cmds, err := factory.ParseAllCommands(config.NewLegacyRunCommands(echoCmd()), "test-task", log, nil, "", interp)
+	require.NoError(t, err)
 	assert.Len(t, cmds, 1)
 }
 
@@ -101,7 +121,8 @@ func TestParseAllCommandsSimple(t *testing.T) {
 	log := zap.NewNop()
 	interp := idgen.NewGenIDInterpolator()
 
-	cmds := ParseAllCommands(config.NewLegacyRunCommands(echoCmd()), "task1", log, nil, "", interp)
+	cmds, err := ParseAllCommands(config.NewLegacyRunCommands(echoCmd()), "task1", log, nil, "", interp)
+	require.NoError(t, err)
 	assert.Len(t, cmds, 1)
 }
 
@@ -109,7 +130,8 @@ func TestParseAllCommandsMultiple(t *testing.T) {
 	log := zap.NewNop()
 	interp := idgen.NewGenIDInterpolator()
 
-	cmds := ParseAllCommands(config.NewLegacyRunCommands(echoCmd(), echoCmd(), echoCmd()), "task1", log, nil, "", interp)
+	cmds, err := ParseAllCommands(config.NewLegacyRunCommands(echoCmd(), echoCmd(), echoCmd()), "task1", log, nil, "", interp)
+	require.NoError(t, err)
 	assert.Len(t, cmds, 3)
 }
 
@@ -126,7 +148,8 @@ func TestParseAllCommandsInterpolatesEnvVariables(t *testing.T) {
 		baseCmd = "cmd /c echo"
 	}
 
-	cmds := ParseAllCommands(config.NewLegacyRunCommands(baseCmd+" ${GREETING}"), "task1", log, env, "", interp)
+	cmds, err := ParseAllCommands(config.NewLegacyRunCommands(baseCmd+" ${GREETING}"), "task1", log, env, "", interp)
+	require.NoError(t, err)
 	assert.Len(t, cmds, 1)
 	// The interpolated command should have "hello" as the argument
 	assert.Contains(t, cmds[0].cmd.Args, "hello")
@@ -137,7 +160,7 @@ func TestParseAllCommandsWithProcessManager(t *testing.T) {
 	interp := idgen.NewGenIDInterpolator()
 	pm := DefaultProcessManager()
 
-	cmds := ParseAllCommandsWithProcessManager(
+	cmds, err := ParseAllCommandsWithProcessManager(
 		config.NewLegacyRunCommands(echoCmd()),
 		"task-pm",
 		log,
@@ -146,6 +169,7 @@ func TestParseAllCommandsWithProcessManager(t *testing.T) {
 		interp,
 		pm,
 	)
+	require.NoError(t, err)
 	assert.Len(t, cmds, 1)
 	assert.Equal(t, "task-pm", cmds[0].taskId)
 }
@@ -154,8 +178,18 @@ func TestParseAllCommandsEmptySlice(t *testing.T) {
 	log := zap.NewNop()
 	interp := idgen.NewGenIDInterpolator()
 
-	cmds := ParseAllCommands(config.RunCommands{}, "task1", log, nil, "", interp)
+	cmds, err := ParseAllCommands(config.RunCommands{}, "task1", log, nil, "", interp)
+	require.NoError(t, err)
 	assert.Empty(t, cmds)
+}
+
+func TestParseAllCommandsReturnsErrorForInvalidLegacyCommand(t *testing.T) {
+	log := zap.NewNop()
+	interp := idgen.NewGenIDInterpolator()
+
+	cmds, err := ParseAllCommands(config.NewLegacyRunCommands(`echo "oops`), "task1", log, nil, "", interp)
+	assert.Nil(t, cmds)
+	assert.Error(t, err)
 }
 
 // --- WrapLogger ---
@@ -227,11 +261,12 @@ func TestCommandWrapperRunSimpleCommand(t *testing.T) {
 	interp := idgen.NewGenIDInterpolator()
 	wrapLog := NewWrapLogger([]string{"run-test"})
 
-	cmds := ParseAllCommands(config.NewLegacyRunCommands(echoCmd()), "run-test", log, nil, "", interp)
+	cmds, err := ParseAllCommands(config.NewLegacyRunCommands(echoCmd()), "run-test", log, nil, "", interp)
+	require.NoError(t, err)
 	assert.Len(t, cmds, 1)
 
 	ctx := context.Background()
-	err := cmds[0].Run(ctx, nil, wrapLog)
+	err = cmds[0].Run(ctx, nil, wrapLog)
 	assert.NoError(t, err)
 }
 
@@ -240,11 +275,12 @@ func TestCommandWrapperRunTrueCommand(t *testing.T) {
 	interp := idgen.NewGenIDInterpolator()
 	wrapLog := NewWrapLogger([]string{"true-test"})
 
-	cmds := ParseAllCommands(config.NewLegacyRunCommands(successCmd()), "true-test", log, nil, "", interp)
+	cmds, err := ParseAllCommands(config.NewLegacyRunCommands(successCmd()), "true-test", log, nil, "", interp)
+	require.NoError(t, err)
 	assert.Len(t, cmds, 1)
 
 	ctx := context.Background()
-	err := cmds[0].Run(ctx, nil, wrapLog)
+	err = cmds[0].Run(ctx, nil, wrapLog)
 	assert.NoError(t, err)
 }
 
@@ -253,11 +289,12 @@ func TestCommandWrapperRunFailingCommand(t *testing.T) {
 	interp := idgen.NewGenIDInterpolator()
 	wrapLog := NewWrapLogger([]string{"fail-test"})
 
-	cmds := ParseAllCommands(config.NewLegacyRunCommands(failCmd()), "fail-test", log, nil, "", interp)
+	cmds, err := ParseAllCommands(config.NewLegacyRunCommands(failCmd()), "fail-test", log, nil, "", interp)
+	require.NoError(t, err)
 	assert.Len(t, cmds, 1)
 
 	ctx := context.Background()
-	err := cmds[0].Run(ctx, nil, wrapLog)
+	err = cmds[0].Run(ctx, nil, wrapLog)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "fail-test")
 }
@@ -269,7 +306,8 @@ func TestCommandWrapperCancel(t *testing.T) {
 	interp := idgen.NewGenIDInterpolator()
 	wrapLog := NewWrapLogger([]string{"cancel-test"})
 
-	cmds := ParseAllCommands(config.NewLegacyRunCommands(longRunningCmd()), "cancel-test", log, nil, "", interp)
+	cmds, err := ParseAllCommands(config.NewLegacyRunCommands(longRunningCmd()), "cancel-test", log, nil, "", interp)
+	require.NoError(t, err)
 	assert.Len(t, cmds, 1)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -295,18 +333,55 @@ func TestCommandWrapperCancel(t *testing.T) {
 	}
 }
 
+func TestCommandWrapperRunUsesProcessManagerForContextCancellation(t *testing.T) {
+	log := zap.NewNop()
+	interp := idgen.NewGenIDInterpolator()
+	wrapLog := NewWrapLogger([]string{"cancel-manager-test"})
+	pm := &recordingProcessManager{}
+
+	cmds, err := ParseAllCommandsWithProcessManager(
+		config.NewLegacyRunCommands(longRunningCmd()),
+		"cancel-manager-test",
+		log,
+		nil,
+		"",
+		interp,
+		pm,
+	)
+	require.NoError(t, err)
+	require.Len(t, cmds, 1)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- cmds[0].Run(ctx, nil, wrapLog)
+	}()
+
+	time.Sleep(200 * time.Millisecond)
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("command did not terminate after cancel within timeout")
+	}
+
+	assert.True(t, pm.cancelCalled.Load(), "context cancellation should use ProcessManager.CancelProcess")
+}
+
 func TestCommandWrapperCancelViaDirectCall(t *testing.T) {
 	log := zap.NewNop()
 	interp := idgen.NewGenIDInterpolator()
 	wrapLog := NewWrapLogger([]string{"direct-cancel"})
 
-	cmds := ParseAllCommands(config.NewLegacyRunCommands(longRunningCmd()), "direct-cancel", log, nil, "", interp)
+	cmds, err := ParseAllCommands(config.NewLegacyRunCommands(longRunningCmd()), "direct-cancel", log, nil, "", interp)
+	require.NoError(t, err)
 	assert.Len(t, cmds, 1)
 
 	cmd := cmds[0]
 
 	// Set up pipes and start the command manually to test Cancel directly
-	err := cmd.setupPipes()
+	err = cmd.setupPipes()
 	assert.NoError(t, err)
 
 	cmd.readOutput(wrapLog)
@@ -345,7 +420,7 @@ func TestParseAllCommandsWithProcessManager_NilProcMgr(t *testing.T) {
 	interp := idgen.NewGenIDInterpolator()
 
 	assert.NotPanics(t, func() {
-		cmds := ParseAllCommandsWithProcessManager(
+		cmds, err := ParseAllCommandsWithProcessManager(
 			config.NewLegacyRunCommands(echoCmd()),
 			"nil-pm-task",
 			log,
@@ -354,6 +429,7 @@ func TestParseAllCommandsWithProcessManager_NilProcMgr(t *testing.T) {
 			interp,
 			nil, // nil ProcessManager
 		)
+		require.NoError(t, err)
 		assert.Len(t, cmds, 1)
 		assert.Equal(t, "nil-pm-task", cmds[0].taskId)
 	})
@@ -364,7 +440,7 @@ func TestParseAllCommandsWithProcessManager_NilProcMgr_EmptyCommands(t *testing.
 	interp := idgen.NewGenIDInterpolator()
 
 	assert.NotPanics(t, func() {
-		cmds := ParseAllCommandsWithProcessManager(
+		cmds, err := ParseAllCommandsWithProcessManager(
 			config.RunCommands{},
 			"nil-pm-empty",
 			log,
@@ -373,6 +449,7 @@ func TestParseAllCommandsWithProcessManager_NilProcMgr_EmptyCommands(t *testing.
 			interp,
 			nil,
 		)
+		require.NoError(t, err)
 		assert.Empty(t, cmds)
 	})
 }
@@ -386,7 +463,8 @@ func TestNewDefaultCommandFactory_NilProcMgr(t *testing.T) {
 		// Verify the factory actually works by parsing a command
 		log := zap.NewNop()
 		interp := idgen.NewGenIDInterpolator()
-		cmds := factory.ParseAllCommands(config.NewLegacyRunCommands(echoCmd()), "nil-factory", log, nil, "", interp)
+		cmds, err := factory.ParseAllCommands(config.NewLegacyRunCommands(echoCmd()), "nil-factory", log, nil, "", interp)
+		require.NoError(t, err)
 		assert.Len(t, cmds, 1)
 	})
 }
