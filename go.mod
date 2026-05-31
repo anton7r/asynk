@@ -8,6 +8,7 @@ require (
 	github.com/gobwas/glob v0.2.3
 	github.com/joho/godotenv v1.5.1
 	go.uber.org/zap v1.27.1
+	golang.org/x/sys v0.40.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
@@ -22,5 +23,4 @@ require (
 
 require (
 	github.com/stretchr/testify v1.11.1
-	golang.org/x/sys v0.40.0 // indirect
 )
