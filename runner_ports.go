@@ -352,6 +352,7 @@ func cloneTaskConfig(taskConfig *config.TaskConfig) *config.TaskConfig {
 	clone.RunMac = append(config.RunCommands{}, taskConfig.RunMac...)
 	clone.Include = append(configutil.GlobArray{}, taskConfig.Include...)
 	clone.Exclude = append(configutil.GlobArray{}, taskConfig.Exclude...)
+	clone.RebuildSuppression = taskConfig.RebuildSuppression
 	clone.Dependencies = append(configutil.StringArray{}, taskConfig.Dependencies...)
 	clone.Env = append(configutil.StringArray{}, taskConfig.Env...)
 	clone.Consumes = make([]config.ConsumeConfig, len(taskConfig.Consumes))

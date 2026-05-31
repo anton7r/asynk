@@ -53,6 +53,7 @@ type Runner struct {
 	deps               RunnerDeps
 	runOnce            bool
 	completionChan     chan struct{}
+	rebuildSuppression *rebuildSuppressionState
 }
 
 // RunnerDeps holds all injectable infrastructure dependencies for the Runner.
@@ -117,6 +118,7 @@ func NewRunnerWithDeps(configuration *config.Config, log *zap.Logger, runOnce bo
 		deps:               deps,
 		runOnce:            runOnce,
 		completionChan:     make(chan struct{}, 1),
+		rebuildSuppression: newRebuildSuppressionState(),
 	}
 
 	taskIds := make([]string, 0, len(configuration.Tasks))
@@ -139,14 +141,17 @@ func NewRunnerWithDeps(configuration *config.Config, log *zap.Logger, runOnce bo
 			deps.FS,
 			nil,
 			watcher.WatcherOptions{
-				DefaultFSDebounce:    defaultFSDebounce,
-				DefaultFSDebounceSet: true,
-				TaskFSDebounces:      configuration.TaskFSDebounces(),
+				DefaultFSDebounce:       defaultFSDebounce,
+				DefaultFSDebounceSet:    true,
+				TaskFSDebounces:         configuration.TaskFSDebounces(),
+				RebuildSuppressionTasks: configuration.RebuildSuppressionTasks(),
 			},
 		)
 		if err != nil {
 			log.Error("Error creating watcher", zap.Error(err))
 		}
+
+		runner.initializeRebuildSuppression()
 	}
 
 	runner.wrapLogger = cmdwrap.NewWrapLogger(taskIds)
@@ -327,6 +332,7 @@ func (runner *Runner) onFileChange(events map[string]watcher.AggregatedEvent) {
 	// Find tasks affected by file changes
 	// TODO: We could optimize this by passing range funcs
 	schedulableTasks := runner.findTasksAffectedByFileChanges(events)
+	schedulableTasks = runner.filterUnchangedRebuildInputs(schedulableTasks)
 	schedulableTasks = runner.filterRunningTasks(schedulableTasks)
 
 	if len(schedulableTasks) == 0 {
@@ -356,6 +362,8 @@ func (runner *Runner) onTaskStart(runningTask *task.RunningTask) {
 }
 
 func (runner *Runner) onTaskFinished(taskIdentifier string, errored bool) {
+	runner.recordRebuildSuppressionTaskResult(taskIdentifier, errored)
+
 	runner.RunningTaskMutex.Lock()
 	runner.RunningTasks = task.RemoveRunningTask(runner.RunningTasks, taskIdentifier)
 	runningCount := len(runner.RunningTasks)

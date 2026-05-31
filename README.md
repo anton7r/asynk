@@ -61,6 +61,13 @@ shared:
     # Debounces filesystem events before affected tasks are scheduled.
     # Defaults to 200ms. Use 0ms to disable debounce globally.
     fs-debounce: 200ms
+    # Optional: skip rebuilds when a task's effective inputs did not change.
+    # Defaults to disabled. after-failure defaults to rebuild when enabled.
+    rebuild-suppression:
+      enabled: true
+      mode: size-and-hash
+      normalize: none
+      after-failure: rebuild
     # Excludes directories globally for all the configurations
     # For example if you want to ignore node_modules folder.
     # Supports glob patterns
@@ -93,10 +100,38 @@ tasks:
           args: [build, -o, ./bin/app]
         # Overrides shared.fs-debounce for this task.
         fs-debounce: 500ms
+        # Optional task override. Use normalization only when ignored
+        # characters are not meaningful for this task's inputs.
+        rebuild-suppression:
+          normalize: ignore-whitespace
         # Watches for all go file changes under the project root
         include: **.go
 
 ```
+
+### Rebuild suppression
+
+`rebuild-suppression` is opt-in and can be configured globally under `shared` or per task. When enabled, asynk fingerprints the files matched by a task's `include` minus `exclude` after applying shared excludes. If a filesystem event arrives but the fingerprint is unchanged, the task is not scheduled.
+
+```yaml
+shared:
+  rebuild-suppression:
+    enabled: true
+    mode: size-and-hash
+    normalize: none
+    after-failure: rebuild
+
+tasks:
+  go:
+    type: build
+    run: "go build ./..."
+    include:
+      - "**/*.go"
+    rebuild-suppression:
+      normalize: ignore-whitespace
+```
+
+`mode` can be `size-and-hash` or `size-and-mtime`. Hash mode is more accurate and avoids timestamp-only rebuilds. `normalize` can be `none`, `ignore-whitespace`, or `ignore-non-alnum`; normalization is only useful for text inputs and falls back to raw bytes for invalid UTF-8. `after-failure` can be `rebuild` or `suppress`; the default `rebuild` retries unchanged inputs after a failed task so debugging remains straightforward.
 
 ### Task commands, working directories, and environment
 

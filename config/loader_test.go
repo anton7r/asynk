@@ -167,6 +167,127 @@ tasks:
 	assert.Contains(t, err.Error(), "fs-debounce cannot be negative")
 }
 
+func TestLoadFromBytes_RebuildSuppressionInheritance(t *testing.T) {
+	yml := []byte(`
+shared:
+  rebuild-suppression:
+    enabled: true
+    mode: size-and-hash
+    normalize: ignore-whitespace
+    after-failure: rebuild
+tasks:
+  inherited:
+    type: build
+    run: "echo inherited"
+  disabled:
+    type: build
+    run: "echo disabled"
+    rebuild-suppression:
+      enabled: false
+  override:
+    type: build
+    run: "echo override"
+    rebuild-suppression:
+      mode: size-and-mtime
+      normalize: none
+      after-failure: suppress
+`)
+
+	cfg, err := LoadFromBytes(yml)
+	assert.NoError(t, err)
+
+	inherited := cfg.EffectiveRebuildSuppressionForTask("inherited")
+	assert.True(t, inherited.Enabled)
+	assert.Equal(t, RebuildSuppressionMode_SizeAndHash, inherited.Mode)
+	assert.Equal(t, RebuildSuppressionNormalize_IgnoreWS, inherited.Normalize)
+	assert.Equal(t, RebuildSuppressionAfterFailure_Rebuild, inherited.AfterFailure)
+
+	disabled := cfg.EffectiveRebuildSuppressionForTask("disabled")
+	assert.False(t, disabled.Enabled)
+
+	override := cfg.EffectiveRebuildSuppressionForTask("override")
+	assert.True(t, override.Enabled)
+	assert.Equal(t, RebuildSuppressionMode_SizeAndMTime, override.Mode)
+	assert.Equal(t, RebuildSuppressionNormalize_None, override.Normalize)
+	assert.Equal(t, RebuildSuppressionAfterFailure_Suppress, override.AfterFailure)
+}
+
+func TestLoadFromBytes_RebuildSuppressionTaskDefaults(t *testing.T) {
+	yml := []byte(`
+tasks:
+  build:
+    type: build
+    run: "echo build"
+    rebuild-suppression:
+      enabled: true
+`)
+
+	cfg, err := LoadFromBytes(yml)
+	assert.NoError(t, err)
+
+	effective := cfg.EffectiveRebuildSuppressionForTask("build")
+	assert.True(t, effective.Enabled)
+	assert.Equal(t, RebuildSuppressionMode_SizeAndHash, effective.Mode)
+	assert.Equal(t, RebuildSuppressionNormalize_None, effective.Normalize)
+	assert.Equal(t, RebuildSuppressionAfterFailure_Rebuild, effective.AfterFailure)
+}
+
+func TestLoadFromBytes_RebuildSuppressionInvalid(t *testing.T) {
+	tests := []struct {
+		name string
+		yaml string
+		want string
+	}{
+		{
+			name: "mode",
+			yaml: `
+shared:
+  rebuild-suppression:
+    mode: checksum
+tasks:
+  build:
+    type: build
+    run: "echo build"
+`,
+			want: "rebuild-suppression mode",
+		},
+		{
+			name: "normalize",
+			yaml: `
+shared:
+  rebuild-suppression:
+    normalize: ignore-comments
+tasks:
+  build:
+    type: build
+    run: "echo build"
+`,
+			want: "rebuild-suppression normalize",
+		},
+		{
+			name: "after failure",
+			yaml: `
+tasks:
+  build:
+    type: build
+    run: "echo build"
+    rebuild-suppression:
+      after-failure: retry
+`,
+			want: "rebuild-suppression after-failure",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := LoadFromBytes([]byte(tt.yaml))
+			assert.Error(t, err)
+			assert.Nil(t, cfg)
+			assert.Contains(t, err.Error(), tt.want)
+		})
+	}
+}
+
 func TestLoadFromBytes_InvalidYAML(t *testing.T) {
 	yml := []byte(`invalid: [yaml: broken`)
 	cfg, err := LoadFromBytes(yml)

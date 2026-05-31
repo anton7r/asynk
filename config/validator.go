@@ -169,6 +169,45 @@ func (v *validator) validateFSDebounce() error {
 	return nil
 }
 
+func (v *validator) validateRebuildSuppression() error {
+	if err := validateRebuildSuppressionConfig("shared", v.config.Shared.RebuildSuppression); err != nil {
+		return err
+	}
+
+	for _, taskConfig := range v.config.Tasks {
+		if err := validateRebuildSuppressionConfig(
+			fmt.Sprintf("task %s", taskConfig.Identifier),
+			taskConfig.RebuildSuppression,
+		); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func validateRebuildSuppressionConfig(scope string, suppression RebuildSuppressionConfig) error {
+	switch suppression.Mode {
+	case "", RebuildSuppressionMode_SizeAndHash, RebuildSuppressionMode_SizeAndMTime:
+	default:
+		return fmt.Errorf("invalid %s rebuild-suppression mode: %s", scope, suppression.Mode)
+	}
+
+	switch suppression.Normalize {
+	case "", RebuildSuppressionNormalize_None, RebuildSuppressionNormalize_IgnoreWS, RebuildSuppressionNormalize_IgnoreNonAlnum:
+	default:
+		return fmt.Errorf("invalid %s rebuild-suppression normalize: %s", scope, suppression.Normalize)
+	}
+
+	switch suppression.AfterFailure {
+	case "", RebuildSuppressionAfterFailure_Rebuild, RebuildSuppressionAfterFailure_Suppress:
+	default:
+		return fmt.Errorf("invalid %s rebuild-suppression after-failure: %s", scope, suppression.AfterFailure)
+	}
+
+	return nil
+}
+
 func (v *validator) validatePortConfigs() error {
 	for _, taskConfig := range v.config.Tasks {
 		portConfig := taskConfig.Port
@@ -463,6 +502,7 @@ func validateConfig(config *Config) error {
 	validationSteps := []func() error{
 		validator.validateTaskId,
 		validator.validateFSDebounce,
+		validator.validateRebuildSuppression,
 		validator.validateWorkingDirectories,
 		validator.validateRunCommand,
 		validator.validateTaskTypes,

@@ -467,6 +467,68 @@ func TestHandleFsEvent_RemoveEvent(t *testing.T) {
 	w.Close()
 }
 
+func TestHandleFsEvent_RemoveEvent_PropagatesForSuppressedTask(t *testing.T) {
+	logger := zap.NewNop()
+	mfs := newMockFS()
+
+	taskConfigs := TaskConfigMap{
+		"build": &config.TaskConfig{
+			Include: configutil.NewGlobArray("**/*.go"),
+			Exclude: configutil.NewGlobArray(),
+		},
+		"lint": &config.TaskConfig{
+			Include: configutil.NewGlobArray("**/*.go"),
+			Exclude: configutil.NewGlobArray(),
+		},
+	}
+
+	dirs := &WatchableDirectories{
+		directories: map[string]WatchableDirectory{
+			"src": {
+				MatchedDirectory: "src",
+				RelativePath:     "./src",
+				TaskIds:          map[string]bool{"build": true, "lint": true},
+			},
+		},
+		taskConfigs: taskConfigs,
+	}
+
+	eventsChan := make(chan map[string]AggregatedEvent, 1)
+	fw := newTestFsWatcher()
+	w, err := NewWatcherWithDepsAndOptions(
+		logger,
+		dirs,
+		func(events map[string]AggregatedEvent) { eventsChan <- events },
+		mfs,
+		fw,
+		WatcherOptions{
+			DefaultFSDebounce:    0,
+			DefaultFSDebounceSet: true,
+			RebuildSuppressionTasks: map[string]bool{
+				"build": true,
+			},
+		},
+	)
+	assert.NoError(t, err)
+
+	w.handleFsEvent(fsnotify.Event{
+		Name: "src/main.go",
+		Op:   fsnotify.Remove,
+	})
+
+	select {
+	case events := <-eventsChan:
+		assert.Contains(t, events, "src")
+		assert.Contains(t, events["src"].Files, "src/main.go")
+		assert.True(t, events["src"].Tasks["build"])
+		assert.False(t, events["src"].Tasks["lint"])
+	case <-time.After(2 * time.Second):
+		t.Fatal("Timed out waiting for suppressed remove event")
+	}
+
+	w.Close()
+}
+
 func TestHandleFsEvent_CreateEvent(t *testing.T) {
 	logger := zap.NewNop()
 	mfs := newMockFS()

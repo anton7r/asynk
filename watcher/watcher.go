@@ -17,20 +17,22 @@ import (
 const DefaultFSDebounce = 200 * time.Millisecond
 
 type Watcher struct {
-	directories          *WatchableDirectories
-	watcher              FsWatcher
-	log                  *zap.Logger
-	aggregator           *FileEventAggregator
-	propagateChangeEvent func(events map[string]AggregatedEvent)
-	fs                   util.FileSystem
-	defaultFSDebounce    time.Duration
-	taskFSDebounces      map[string]time.Duration
+	directories             *WatchableDirectories
+	watcher                 FsWatcher
+	log                     *zap.Logger
+	aggregator              *FileEventAggregator
+	propagateChangeEvent    func(events map[string]AggregatedEvent)
+	fs                      util.FileSystem
+	defaultFSDebounce       time.Duration
+	taskFSDebounces         map[string]time.Duration
+	rebuildSuppressionTasks map[string]bool
 }
 
 type WatcherOptions struct {
-	DefaultFSDebounce    time.Duration
-	DefaultFSDebounceSet bool
-	TaskFSDebounces      map[string]time.Duration
+	DefaultFSDebounce       time.Duration
+	DefaultFSDebounceSet    bool
+	TaskFSDebounces         map[string]time.Duration
+	RebuildSuppressionTasks map[string]bool
 }
 
 type UpdatedFile struct {
@@ -107,13 +109,14 @@ func NewWatcherWithDepsAndOptions(
 	}
 
 	w := &Watcher{
-		watcher:              fsWatcher,
-		log:                  log,
-		directories:          watchedDirectories,
-		propagateChangeEvent: propagateChangeEvent,
-		fs:                   fs,
-		defaultFSDebounce:    defaultFSDebounce,
-		taskFSDebounces:      copyTaskFSDebounces(options.TaskFSDebounces),
+		watcher:                 fsWatcher,
+		log:                     log,
+		directories:             watchedDirectories,
+		propagateChangeEvent:    propagateChangeEvent,
+		fs:                      fs,
+		defaultFSDebounce:       defaultFSDebounce,
+		taskFSDebounces:         copyTaskFSDebounces(options.TaskFSDebounces),
+		rebuildSuppressionTasks: copyBoolMap(options.RebuildSuppressionTasks),
 		aggregator: &FileEventAggregator{
 			aggregated:     make(map[string]AggregatedEvent),
 			aggregatorLock: sync.Mutex{},
@@ -130,6 +133,14 @@ func copyTaskFSDebounces(source map[string]time.Duration) map[string]time.Durati
 		debounces[taskId] = debounce
 	}
 	return debounces
+}
+
+func copyBoolMap(source map[string]bool) map[string]bool {
+	target := make(map[string]bool, len(source))
+	for key, value := range source {
+		target[key] = value
+	}
+	return target
 }
 
 func (w *Watcher) Close() {
@@ -190,6 +201,10 @@ func (w *Watcher) handleFsEvent(event fsnotify.Event) {
 	)
 
 	if event.Op&fsnotify.Remove == fsnotify.Remove {
+		if w.aggregateRemoveForSuppressedTasks(changePath) {
+			return
+		}
+
 		// Removed files should not trigger task restarts. A file deletion is
 		// not an actionable change — the interesting events are CREATE and
 		// WRITE for new/updated files. Skipping Remove events also prevents
@@ -231,6 +246,31 @@ func (w *Watcher) handleFsEvent(event fsnotify.Event) {
 
 }
 
+func (w *Watcher) aggregateRemoveForSuppressedTasks(changePath string) bool {
+	if len(w.rebuildSuppressionTasks) == 0 {
+		return false
+	}
+
+	dirPath := path.Dir(changePath)
+	eventDirPath, eventFilePath, directories, ok := w.findWatchableDirectory(dirPath, changePath)
+	if !ok {
+		return false
+	}
+
+	tasks := w.matchingTasksForFile(eventFilePath, directories.TaskIds)
+	for taskId := range tasks {
+		if !w.rebuildSuppressionTasks[taskId] {
+			delete(tasks, taskId)
+		}
+	}
+	if len(tasks) == 0 {
+		return false
+	}
+
+	w.addAggregatedEvent(eventDirPath, eventFilePath, time.Now(), tasks)
+	return true
+}
+
 func (w *Watcher) checkIfWeNeedToNotify(
 	changePath string,
 	dirPath string,
@@ -247,30 +287,39 @@ func (w *Watcher) checkIfWeNeedToNotify(
 	tasks := w.matchingTasksForFile(eventFilePath, directories.TaskIds)
 
 	if len(tasks) > 0 {
-		w.aggregator.aggregatorLock.Lock()
-		event, exists := w.aggregator.aggregated[eventDirPath]
-		if !exists {
-			event = AggregatedEvent{
-				Dir:   eventDirPath,
-				Files: make(map[string]*UpdatedFile),
-				Tasks: make(map[string]bool),
-			}
-		}
-
-		event.Files[eventFilePath] = &UpdatedFile{
-			ModifiedTime: modifiedTime,
-		}
-		for taskId := range tasks {
-			event.Tasks[taskId] = true
-		}
-		w.aggregator.aggregated[eventDirPath] = event
-		delay := w.fsDebounceForTasks(w.pendingTasks())
-		w.aggregator.changeId++
-		changeId := w.aggregator.changeId
-		w.aggregator.aggregatorLock.Unlock()
-
-		go w.propagateEvents(delay, changeId)
+		w.addAggregatedEvent(eventDirPath, eventFilePath, modifiedTime, tasks)
 	}
+}
+
+func (w *Watcher) addAggregatedEvent(
+	eventDirPath string,
+	eventFilePath string,
+	modifiedTime time.Time,
+	tasks map[string]bool,
+) {
+	w.aggregator.aggregatorLock.Lock()
+	event, exists := w.aggregator.aggregated[eventDirPath]
+	if !exists {
+		event = AggregatedEvent{
+			Dir:   eventDirPath,
+			Files: make(map[string]*UpdatedFile),
+			Tasks: make(map[string]bool),
+		}
+	}
+
+	event.Files[eventFilePath] = &UpdatedFile{
+		ModifiedTime: modifiedTime,
+	}
+	for taskId := range tasks {
+		event.Tasks[taskId] = true
+	}
+	w.aggregator.aggregated[eventDirPath] = event
+	delay := w.fsDebounceForTasks(w.pendingTasks())
+	w.aggregator.changeId++
+	changeId := w.aggregator.changeId
+	w.aggregator.aggregatorLock.Unlock()
+
+	go w.propagateEvents(delay, changeId)
 }
 
 func (w *Watcher) matchingTasksForFile(filePath string, directoryTasks map[string]bool) map[string]bool {
