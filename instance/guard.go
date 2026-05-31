@@ -31,9 +31,18 @@ const (
 )
 
 type ProcessProbe interface {
-	Matches(pid int, startTime time.Time) bool
+	Status(pid int, startTime time.Time) OwnerStatus
 	CurrentStartTime(pid int) (time.Time, bool)
 }
+
+type OwnerStatus int
+
+const (
+	OwnerStatusDead OwnerStatus = iota
+	OwnerStatusMatch
+	OwnerStatusStale
+	OwnerStatusUnverified
+)
 
 type Options struct {
 	ConfigDir      string
@@ -45,7 +54,8 @@ type Options struct {
 	PID            int
 	Token          string
 
-	beforeStaleRemove func()
+	beforeStaleRemove     func()
+	beforeRequestShutdown func()
 }
 
 type Guard struct {
@@ -143,7 +153,8 @@ func Acquire(options Options) (*Guard, error) {
 			return nil, fmt.Errorf("reading instance owner: %w", err)
 		}
 
-		if !options.Probe.Matches(owner.PID, owner.StartTime) {
+		ownerStatus := options.Probe.Status(owner.PID, owner.StartTime)
+		if ownerStatus == OwnerStatusDead || ownerStatus == OwnerStatusStale {
 			removed, err := guard.removeStaleLockIfUnchanged(ownerData, options.beforeStaleRemove)
 			if err != nil {
 				return nil, fmt.Errorf("removing stale instance lock: %w", err)
@@ -158,7 +169,13 @@ func Acquire(options Options) (*Guard, error) {
 		case PolicyBlock:
 			return nil, alreadyRunningError(owner)
 		case PolicyReplace:
+			if options.beforeRequestShutdown != nil {
+				options.beforeRequestShutdown()
+			}
 			if err := requestShutdown(owner, options.PID, options.Now()); err != nil {
+				if errors.Is(err, os.ErrNotExist) {
+					continue
+				}
 				return nil, err
 			}
 			if err := waitForRelease(lockDir, options.ReplaceTimeout); err != nil {

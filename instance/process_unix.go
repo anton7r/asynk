@@ -14,22 +14,29 @@ var (
 	osProcessStartTime = platformProcessStartTime
 )
 
-func (OSProcessProbe) Matches(pid int, startTime time.Time) bool {
+func (probe OSProcessProbe) Status(pid int, startTime time.Time) OwnerStatus {
 	if pid <= 0 {
-		return false
+		return OwnerStatusDead
 	}
 
 	err := osProcessAlive(pid)
 	if err != nil && err != syscall.EPERM {
-		return false
+		return OwnerStatusDead
 	}
 
 	processStart, ok := osProcessStartTime(pid)
 	if !ok {
-		return false
+		return OwnerStatusUnverified
 	}
 
-	return sameStartTime(processStart, startTime)
+	if sameStartTime(processStart, startTime) {
+		return OwnerStatusMatch
+	}
+	return OwnerStatusStale
+}
+
+func (probe OSProcessProbe) Matches(pid int, startTime time.Time) bool {
+	return probe.Status(pid, startTime) == OwnerStatusMatch
 }
 
 func (OSProcessProbe) CurrentStartTime(pid int) (time.Time, bool) {
