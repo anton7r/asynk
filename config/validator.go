@@ -2,8 +2,13 @@ package config
 
 import (
 	"fmt"
+	"regexp"
+	"sort"
 	"strings"
+	"unicode"
 )
+
+var envNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 type validator struct {
 	config    *Config
@@ -147,6 +152,294 @@ func (v *validator) validateCleanUpTasks() error {
 	return nil
 }
 
+func (v *validator) validatePortConfigs() error {
+	for _, taskConfig := range v.config.Tasks {
+		portConfig := taskConfig.Port
+		if portConfig == nil {
+			continue
+		}
+
+		if taskConfig.Type != TaskType_Continuous {
+			return fmt.Errorf("invalid task configuration, port can only be configured for continuous tasks: %s", taskConfig.Identifier)
+		}
+
+		if portConfig.Env != "" && !isValidEnvName(portConfig.Env) {
+			return fmt.Errorf("invalid task configuration, port env is invalid for task '%s': %s", taskConfig.Identifier, portConfig.Env)
+		}
+
+		if portConfig.Preferred != 0 && !isValidPort(portConfig.Preferred) {
+			return fmt.Errorf("invalid task configuration, preferred port is invalid for task '%s': %d", taskConfig.Identifier, portConfig.Preferred)
+		}
+
+		if portConfig.Preferred == 0 && portConfig.Range == nil {
+			return fmt.Errorf("invalid task configuration, port needs a preferred port or range for task: %s", taskConfig.Identifier)
+		}
+
+		if portConfig.Range != nil {
+			if err := validatePortRange(portConfig.Range, taskConfig.Identifier, "port range"); err != nil {
+				return err
+			}
+		}
+
+		if portConfig.Expose == nil || portConfig.Expose.Proxy == nil || !portConfig.Expose.Proxy.Enabled {
+			continue
+		}
+
+		proxy := portConfig.Expose.Proxy
+		if proxy.Env != "" && !isValidEnvName(proxy.Env) {
+			return fmt.Errorf("invalid task configuration, proxy env is invalid for task '%s': %s", taskConfig.Identifier, proxy.Env)
+		}
+		if proxy.Env != "" && isReservedProxyExportName(taskConfig, proxy.Env) {
+			return fmt.Errorf("invalid task configuration, proxy env shadows reserved export for task '%s': %s", taskConfig.Identifier, proxy.Env)
+		}
+
+		if proxy.Preferred != 0 && !isValidPort(proxy.Preferred) {
+			return fmt.Errorf("invalid task configuration, preferred proxy port is invalid for task '%s': %d", taskConfig.Identifier, proxy.Preferred)
+		}
+
+		if proxy.Preferred == 0 && proxy.Range == nil {
+			return fmt.Errorf("invalid task configuration, proxy needs a preferred port or range for task: %s", taskConfig.Identifier)
+		}
+
+		if proxy.Range != nil {
+			if err := validatePortRange(proxy.Range, taskConfig.Identifier, "proxy range"); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (v *validator) validateConsumes() error {
+	for _, taskConfig := range v.config.Tasks {
+		for _, consume := range taskConfig.Consumes {
+			if consume.Task == "" {
+				return fmt.Errorf("invalid task configuration, consume task is missing: %s", taskConfig.Identifier)
+			}
+
+			provider, exists := v.config.Tasks[consume.Task]
+			if !exists {
+				return fmt.Errorf(
+					"invalid task configuration, consumed task '%s' does not exist: %s",
+					consume.Task, taskConfig.Identifier,
+				)
+			}
+
+			if consume.Task == taskConfig.Identifier {
+				return fmt.Errorf("invalid task configuration, task cannot consume itself: %s", taskConfig.Identifier)
+			}
+
+			if provider.Port == nil {
+				return fmt.Errorf("invalid task configuration, consumed task '%s' does not expose a port: %s", consume.Task, taskConfig.Identifier)
+			}
+
+			if consume.Mode != "" && consume.Mode != ConsumeMode_Direct && consume.Mode != ConsumeMode_Proxy {
+				return fmt.Errorf("invalid task configuration, consume mode is invalid for task '%s': %s", taskConfig.Identifier, consume.Mode)
+			}
+
+			if consume.Mode == ConsumeMode_Proxy && !hasEnabledProxy(provider) {
+				return fmt.Errorf("invalid task configuration, consumed task '%s' does not expose a proxy: %s", consume.Task, taskConfig.Identifier)
+			}
+
+			if consume.OnChange != "" &&
+				consume.OnChange != ConsumeOnChange_None &&
+				consume.OnChange != ConsumeOnChange_Restart {
+				return fmt.Errorf("invalid task configuration, consume on-change is invalid for task '%s': %s", taskConfig.Identifier, consume.OnChange)
+			}
+
+			if len(consume.Env) == 0 {
+				return fmt.Errorf("invalid task configuration, consume env mappings are missing: %s", taskConfig.Identifier)
+			}
+
+			for envName, exportName := range consume.Env {
+				if !isValidEnvName(envName) {
+					return fmt.Errorf("invalid task configuration, consume env is invalid for task '%s': %s", taskConfig.Identifier, envName)
+				}
+
+				if !isValidConsumeExport(provider, exportName) {
+					return fmt.Errorf("invalid task configuration, consume export is invalid for task '%s': %s", taskConfig.Identifier, exportName)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func (v *validator) validateConsumeCycles() error {
+	visited := make(map[string]bool)
+	visiting := make(map[string]bool)
+	stack := make([]string, 0)
+
+	taskIDs := make([]string, 0, len(v.config.Tasks))
+	for taskID := range v.config.Tasks {
+		taskIDs = append(taskIDs, taskID)
+	}
+	sort.Strings(taskIDs)
+
+	var visit func(taskID string) error
+	visit = func(taskID string) error {
+		if visiting[taskID] {
+			return fmt.Errorf("invalid task configuration, consume cycle detected: %s", consumeCyclePath(stack, taskID))
+		}
+		if visited[taskID] {
+			return nil
+		}
+
+		visiting[taskID] = true
+		stack = append(stack, taskID)
+
+		consumes := append([]ConsumeConfig{}, v.config.Tasks[taskID].Consumes...)
+		sort.Slice(consumes, func(i, j int) bool {
+			return consumes[i].Task < consumes[j].Task
+		})
+		for _, consume := range consumes {
+			if _, exists := v.config.Tasks[consume.Task]; !exists {
+				continue
+			}
+			if err := visit(consume.Task); err != nil {
+				return err
+			}
+		}
+
+		stack = stack[:len(stack)-1]
+		visiting[taskID] = false
+		visited[taskID] = true
+		return nil
+	}
+
+	for _, taskID := range taskIDs {
+		if err := visit(taskID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func consumeCyclePath(stack []string, repeated string) string {
+	start := 0
+	for i, taskID := range stack {
+		if taskID == repeated {
+			start = i
+			break
+		}
+	}
+
+	cycle := append([]string{}, stack[start:]...)
+	cycle = append(cycle, repeated)
+	return strings.Join(cycle, " -> ")
+}
+
+func hasEnabledProxy(taskConfig *TaskConfig) bool {
+	return taskConfig != nil &&
+		taskConfig.Port != nil &&
+		taskConfig.Port.Expose != nil &&
+		taskConfig.Port.Expose.Proxy != nil &&
+		taskConfig.Port.Expose.Proxy.Enabled
+}
+
+func isValidConsumeExport(provider *TaskConfig, exportName string) bool {
+	switch ConsumeExport(exportName) {
+	case ConsumeExport_Port, ConsumeExport_URL:
+		return true
+	case ConsumeExport_ProxyURL:
+		return hasEnabledProxy(provider)
+	}
+
+	serviceName := provider.Identifier
+	if provider.Port != nil && provider.Port.Expose != nil && provider.Port.Expose.Name != "" {
+		serviceName = provider.Port.Expose.Name
+	}
+
+	if exportName == exportEnvName(serviceName, "PORT") || exportName == exportEnvName(serviceName, "URL") {
+		return true
+	}
+
+	if !hasEnabledProxy(provider) {
+		return false
+	}
+
+	proxyEnv := provider.Port.Expose.Proxy.Env
+	if proxyEnv == "" {
+		proxyEnv = exportEnvName(serviceName, "PROXY_URL")
+	}
+	return exportName == proxyEnv
+}
+
+func serviceNameForTask(taskConfig *TaskConfig) string {
+	serviceName := taskConfig.Identifier
+	if taskConfig.Port != nil && taskConfig.Port.Expose != nil && taskConfig.Port.Expose.Name != "" {
+		serviceName = taskConfig.Port.Expose.Name
+	}
+	return serviceName
+}
+
+func validatePortRange(portRange *PortRangeConfig, taskId, label string) error {
+	if !isValidPort(portRange.Start) || !isValidPort(portRange.End) {
+		return fmt.Errorf("invalid task configuration, %s has invalid port values for task: %s", label, taskId)
+	}
+
+	if portRange.Start > portRange.End {
+		return fmt.Errorf("invalid task configuration, %s start must be less than or equal to end for task: %s", label, taskId)
+	}
+
+	return nil
+}
+
+func isValidPort(port int) bool {
+	return port >= 1 && port <= 65535
+}
+
+func isValidEnvName(name string) bool {
+	return envNamePattern.MatchString(name)
+}
+
+func isReservedBuiltInExportName(name string) bool {
+	switch ConsumeExport(name) {
+	case ConsumeExport_Port, ConsumeExport_URL, ConsumeExport_ProxyURL:
+		return true
+	default:
+		return false
+	}
+}
+
+func isReservedProxyExportName(taskConfig *TaskConfig, name string) bool {
+	if isReservedBuiltInExportName(name) {
+		return true
+	}
+
+	serviceName := serviceNameForTask(taskConfig)
+	return name == exportEnvName(serviceName, "PORT") || name == exportEnvName(serviceName, "URL")
+}
+
+func exportEnvName(serviceName string, suffix string) string {
+	prefix := strings.Trim(sanitizeEnvSegment(serviceName), "_")
+	if prefix == "" {
+		prefix = "SERVICE"
+	}
+	return prefix + "_" + suffix
+}
+
+func sanitizeEnvSegment(value string) string {
+	var builder strings.Builder
+	lastUnderscore := false
+
+	for _, r := range strings.ToUpper(value) {
+		valid := r == '_' || unicode.IsLetter(r) || unicode.IsDigit(r)
+		if !valid {
+			if !lastUnderscore {
+				builder.WriteRune('_')
+				lastUnderscore = true
+			}
+			continue
+		}
+
+		builder.WriteRune(r)
+		lastUnderscore = r == '_'
+	}
+
+	return builder.String()
+}
+
 func validateConfig(config *Config) error {
 	validator := createValidator(config)
 
@@ -157,6 +450,9 @@ func validateConfig(config *Config) error {
 		validator.validateTaskTypes,
 		validator.validateDependencies,
 		validator.validateCleanUpTasks,
+		validator.validatePortConfigs,
+		validator.validateConsumes,
+		validator.validateConsumeCycles,
 	}
 
 	for _, step := range validationSteps {

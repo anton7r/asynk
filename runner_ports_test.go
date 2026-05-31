@@ -1,0 +1,647 @@
+package main
+
+import (
+	"errors"
+	"fmt"
+	"net"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/anton7r/asynk/cmdwrap"
+	"github.com/anton7r/asynk/config"
+	"github.com/anton7r/asynk/portmanager"
+	"github.com/anton7r/asynk/util/interpolation/idgen"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
+)
+
+type runnerPortChecker struct {
+	unavailable map[int]bool
+}
+
+func (c *runnerPortChecker) Available(port int) bool {
+	return !c.unavailable[port]
+}
+
+func freeRunnerPort(t *testing.T) int {
+	t.Helper()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer listener.Close()
+
+	return listener.Addr().(*net.TCPAddr).Port
+}
+
+func testRunnerForPorts(t *testing.T, yml string, checker *runnerPortChecker) *Runner {
+	t.Helper()
+
+	return testRunnerForPortsWithFactory(t, yml, checker, &mockCommandFactory{})
+}
+
+func testRunnerForPortsWithFactory(
+	t *testing.T,
+	yml string,
+	checker *runnerPortChecker,
+	factory cmdwrap.CommandFactory,
+) *Runner {
+	t.Helper()
+
+	cfg, err := config.LoadFromBytes([]byte(yml))
+	require.NoError(t, err)
+
+	deps := RunnerDeps{
+		Platform:    testPlatform(),
+		FS:          nil,
+		CmdFactory:  factory,
+		PortManager: portmanager.NewManager(checker),
+	}
+
+	return NewRunnerWithDeps(cfg, zap.NewNop(), true, deps)
+}
+
+type recordingCommandFactory struct {
+	mu    sync.Mutex
+	calls []string
+}
+
+func (f *recordingCommandFactory) ParseAllCommands(
+	commands config.RunCommands,
+	taskId string,
+	log *zap.Logger,
+	env map[string]string,
+	cwd string,
+	genIdInterpolator *idgen.GenIDInterpolator,
+) ([]*cmdwrap.CommandWrapper, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.calls = append(f.calls, taskId)
+	return []*cmdwrap.CommandWrapper{}, nil
+}
+
+func (f *recordingCommandFactory) Called(taskID string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	for _, call := range f.calls {
+		if call == taskID {
+			return true
+		}
+	}
+	return false
+}
+
+type failingCommandFactory struct {
+	mu       sync.Mutex
+	failTask string
+	calls    []string
+}
+
+func (f *failingCommandFactory) ParseAllCommands(
+	commands config.RunCommands,
+	taskId string,
+	log *zap.Logger,
+	env map[string]string,
+	cwd string,
+	genIdInterpolator *idgen.GenIDInterpolator,
+) ([]*cmdwrap.CommandWrapper, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.calls = append(f.calls, taskId)
+	if taskId == f.failTask {
+		return nil, errors.New("parse failed")
+	}
+	return []*cmdwrap.CommandWrapper{}, nil
+}
+
+func (f *failingCommandFactory) Called(taskID string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	for _, call := range f.calls {
+		if call == taskID {
+			return true
+		}
+	}
+	return false
+}
+
+func TestPrepareTaskForStart_AssignsPortToEnvAndInterpolationMap(t *testing.T) {
+	checker := &runnerPortChecker{unavailable: map[int]bool{}}
+	runner := testRunnerForPorts(t, `
+tasks:
+  backend:
+    type: continuous
+    run: "go run . --port ${PORT}"
+    port:
+      preferred: 3000
+      range:
+        start: 3000
+        end: 3002
+`, checker)
+
+	preparedTask, globalEnv, changed, err := runner.prepareTaskForStart(runner.Config.Tasks["backend"])
+
+	require.NoError(t, err)
+	assert.True(t, changed)
+	assert.Equal(t, "3000", globalEnv["PORT"])
+	assert.Contains(t, []string(preparedTask.Env), "PORT=3000")
+	assert.NotContains(t, []string(runner.Config.Tasks["backend"].Env), "PORT=3000")
+}
+
+func TestPrepareTaskForStart_FallsBackWhenLastPortIsOccupied(t *testing.T) {
+	checker := &runnerPortChecker{unavailable: map[int]bool{}}
+	runner := testRunnerForPorts(t, `
+tasks:
+  backend:
+    type: continuous
+    run: "go run . --port ${PORT}"
+    port:
+      preferred: 3000
+      range:
+        start: 3000
+        end: 3002
+`, checker)
+
+	_, globalEnv, _, err := runner.prepareTaskForStart(runner.Config.Tasks["backend"])
+	require.NoError(t, err)
+	assert.Equal(t, "3000", globalEnv["PORT"])
+
+	runner.releaseTaskPorts("backend")
+	checker.unavailable[3000] = true
+
+	_, globalEnv, changed, err := runner.prepareTaskForStart(runner.Config.Tasks["backend"])
+
+	require.NoError(t, err)
+	assert.True(t, changed)
+	assert.Equal(t, "3001", globalEnv["PORT"])
+}
+
+func TestPrepareTaskForStart_ProxyReservationDoesNotCollideWithTaskID(t *testing.T) {
+	proxyPort := freeRunnerPort(t)
+	if proxyPort >= 65535 {
+		t.Skip("free port is too high for fallback range")
+	}
+	fallbackPort := proxyPort + 1
+
+	checker := &runnerPortChecker{unavailable: map[int]bool{}}
+	runner := testRunnerForPorts(t, fmt.Sprintf(`
+tasks:
+  api:
+    type: continuous
+    run: "go run . --port ${PORT}"
+    port:
+      preferred: 3000
+      expose:
+        proxy:
+          enabled: true
+          preferred: %d
+  api:proxy:
+    type: continuous
+    run: "go run . --port ${PORT}"
+    port:
+      preferred: %d
+      range:
+        start: %d
+        end: %d
+`, proxyPort, proxyPort, proxyPort, fallbackPort), checker)
+	t.Cleanup(runner.closeManagedProxies)
+
+	_, _, _, err := runner.prepareTaskForStart(runner.Config.Tasks["api"])
+	require.NoError(t, err)
+
+	_, globalEnv, _, err := runner.prepareTaskForStart(runner.Config.Tasks["api:proxy"])
+	require.NoError(t, err)
+
+	assert.Equal(t, fmt.Sprintf("%d", fallbackPort), globalEnv["PORT"])
+}
+
+func TestPrepareTaskForStart_InjectsDirectConsumerEnv(t *testing.T) {
+	checker := &runnerPortChecker{unavailable: map[int]bool{}}
+	runner := testRunnerForPorts(t, `
+tasks:
+  backend:
+    type: continuous
+    run: "go run . --port ${PORT}"
+    port:
+      preferred: 3000
+      range:
+        start: 3000
+        end: 3002
+  frontend:
+    type: continuous
+    run: "npm run dev"
+    consumes:
+      - task: backend
+        mode: direct
+        env:
+          VITE_API_URL: url
+`, checker)
+
+	assert.False(t, runner.canStartTask(&ScheduledTask{TaskConfiguration: runner.Config.Tasks["frontend"]}))
+
+	_, _, _, err := runner.prepareTaskForStart(runner.Config.Tasks["backend"])
+	require.NoError(t, err)
+
+	preparedTask, globalEnv, _, err := runner.prepareTaskForStart(runner.Config.Tasks["frontend"])
+
+	require.NoError(t, err)
+	assert.Equal(t, "http://127.0.0.1:3000", globalEnv["VITE_API_URL"])
+	assert.Contains(t, []string(preparedTask.Env), "VITE_API_URL=http://127.0.0.1:3000")
+}
+
+func TestShouldRestartOnProviderChange_DefaultsByConsumeMode(t *testing.T) {
+	checker := &runnerPortChecker{unavailable: map[int]bool{}}
+	runner := testRunnerForPorts(t, `
+tasks:
+  backend:
+    type: continuous
+    run: "go run . --port ${PORT}"
+    port:
+      preferred: 3000
+      range:
+        start: 3000
+        end: 3002
+      expose:
+        proxy:
+          enabled: true
+          preferred: 8080
+  direct-frontend:
+    type: continuous
+    run: "npm run dev"
+    consumes:
+      - task: backend
+        mode: direct
+        env:
+          VITE_API_URL: url
+  proxy-frontend:
+    type: continuous
+    run: "npm run dev"
+    consumes:
+      - task: backend
+        env:
+          VITE_API_URL: proxy-url
+`, checker)
+
+	assert.True(t, runner.shouldRestartOnProviderChange(runner.Config.Tasks["direct-frontend"].Consumes[0]))
+	assert.False(t, runner.shouldRestartOnProviderChange(runner.Config.Tasks["proxy-frontend"].Consumes[0]))
+}
+
+func TestShouldRestartOnProviderChange_DefaultsToDirectForDirectExports(t *testing.T) {
+	checker := &runnerPortChecker{unavailable: map[int]bool{}}
+	runner := testRunnerForPorts(t, `
+tasks:
+  backend:
+    type: continuous
+    run: "go run . --port ${PORT}"
+    port:
+      preferred: 3000
+      range:
+        start: 3000
+        end: 3002
+      expose:
+        proxy:
+          enabled: true
+          preferred: 8080
+  url-frontend:
+    type: continuous
+    run: "npm run dev"
+    consumes:
+      - task: backend
+        env:
+          VITE_API_URL: url
+  port-frontend:
+    type: continuous
+    run: "npm run dev"
+    consumes:
+      - task: backend
+        env:
+          API_PORT: port
+`, checker)
+
+	assert.True(t, runner.shouldRestartOnProviderChange(runner.Config.Tasks["url-frontend"].Consumes[0]))
+	assert.True(t, runner.shouldRestartOnProviderChange(runner.Config.Tasks["port-frontend"].Consumes[0]))
+}
+
+func TestShouldRestartOnProviderChange_RestartsDirectExportsWithExplicitProxyMode(t *testing.T) {
+	checker := &runnerPortChecker{unavailable: map[int]bool{}}
+	runner := testRunnerForPorts(t, `
+tasks:
+  backend:
+    type: continuous
+    run: "go run . --port ${PORT}"
+    port:
+      preferred: 3000
+      range:
+        start: 3000
+        end: 3002
+      expose:
+        proxy:
+          enabled: true
+          preferred: 8080
+  frontend:
+    type: continuous
+    run: "npm run dev"
+    consumes:
+      - task: backend
+        mode: proxy
+        env:
+          VITE_API_URL: url
+`, checker)
+
+	assert.True(t, runner.shouldRestartOnProviderChange(runner.Config.Tasks["frontend"].Consumes[0]))
+}
+
+func TestShouldRestartOnProviderChange_RestartsNamedDirectExportsWithExplicitProxyMode(t *testing.T) {
+	checker := &runnerPortChecker{unavailable: map[int]bool{}}
+	runner := testRunnerForPorts(t, `
+tasks:
+  backend:
+    type: continuous
+    run: "go run . --port ${PORT}"
+    port:
+      preferred: 3000
+      range:
+        start: 3000
+        end: 3002
+      expose:
+        name: backend
+        proxy:
+          enabled: true
+          preferred: 8080
+  url-frontend:
+    type: continuous
+    run: "npm run dev"
+    consumes:
+      - task: backend
+        mode: proxy
+        env:
+          VITE_API_URL: BACKEND_URL
+  port-frontend:
+    type: continuous
+    run: "npm run dev"
+    consumes:
+      - task: backend
+        mode: proxy
+        env:
+          API_PORT: BACKEND_PORT
+`, checker)
+
+	assert.True(t, runner.shouldRestartOnProviderChange(runner.Config.Tasks["url-frontend"].Consumes[0]))
+	assert.True(t, runner.shouldRestartOnProviderChange(runner.Config.Tasks["port-frontend"].Consumes[0]))
+}
+
+func TestShouldRestartOnProviderChange_TreatsCustomProxyExportAsProxyBacked(t *testing.T) {
+	checker := &runnerPortChecker{unavailable: map[int]bool{}}
+	runner := testRunnerForPorts(t, `
+tasks:
+  backend:
+    type: continuous
+    run: "go run . --port ${PORT}"
+    port:
+      preferred: 3000
+      range:
+        start: 3000
+        end: 3002
+      expose:
+        name: backend
+        proxy:
+          enabled: true
+          env: API_PROXY_URL
+          preferred: 8080
+  default-backend:
+    type: continuous
+    run: "go run . --port ${PORT}"
+    port:
+      preferred: 3010
+      range:
+        start: 3010
+        end: 3012
+      expose:
+        name: backend
+        proxy:
+          enabled: true
+          preferred: 8081
+  custom-proxy-frontend:
+    type: continuous
+    run: "npm run dev"
+    consumes:
+      - task: backend
+        env:
+          VITE_API_URL: API_PROXY_URL
+  default-proxy-frontend:
+    type: continuous
+    run: "npm run dev"
+    consumes:
+      - task: default-backend
+        env:
+          VITE_API_URL: BACKEND_PROXY_URL
+`, checker)
+
+	assert.False(t, runner.shouldRestartOnProviderChange(runner.Config.Tasks["custom-proxy-frontend"].Consumes[0]))
+	assert.False(t, runner.shouldRestartOnProviderChange(runner.Config.Tasks["default-proxy-frontend"].Consumes[0]))
+}
+
+func TestReleaseTaskPorts_ClearsDirectExportsForConsumers(t *testing.T) {
+	checker := &runnerPortChecker{unavailable: map[int]bool{}}
+	runner := testRunnerForPorts(t, `
+tasks:
+  backend:
+    type: continuous
+    run: "go run . --port ${PORT}"
+    port:
+      preferred: 3000
+      range:
+        start: 3000
+        end: 3002
+  frontend:
+    type: continuous
+    run: "npm run dev"
+    consumes:
+      - task: backend
+        env:
+          VITE_API_URL: url
+`, checker)
+
+	_, _, _, err := runner.prepareTaskForStart(runner.Config.Tasks["backend"])
+	require.NoError(t, err)
+	assert.True(t, runner.canStartTask(&ScheduledTask{TaskConfiguration: runner.Config.Tasks["frontend"]}))
+
+	runner.releaseTaskPorts("backend")
+
+	assert.False(t, runner.canStartTask(&ScheduledTask{TaskConfiguration: runner.Config.Tasks["frontend"]}))
+}
+
+func TestStartScheduledTask_SchedulesExplicitRestartConsumerWhenExportsStayStable(t *testing.T) {
+	checker := &runnerPortChecker{unavailable: map[int]bool{}}
+	factory := &recordingCommandFactory{}
+	runner := testRunnerForPortsWithFactory(t, fmt.Sprintf(`
+tasks:
+  backend:
+    type: continuous
+    run: "go run . --port ${PORT}"
+    port:
+      preferred: 3000
+      range:
+        start: 3000
+        end: 3002
+      expose:
+        proxy:
+          enabled: true
+          preferred: %d
+  frontend:
+    type: continuous
+    run: "npm run dev"
+    consumes:
+      - task: backend
+        env:
+          VITE_API_URL: proxy-url
+        on-change: restart
+`, freeRunnerPort(t)), checker, factory)
+
+	_, _, changed, err := runner.prepareTaskForStart(runner.Config.Tasks["backend"])
+	require.NoError(t, err)
+	require.True(t, changed)
+
+	runner.startScheduledTask("backend", &ScheduledTask{TaskConfiguration: runner.Config.Tasks["backend"]})
+
+	assert.Eventually(t, func() bool {
+		runner.ScheduledTaskMutex.Lock()
+		queued := runner.ScheduledTasks["frontend"] != nil
+		runner.ScheduledTaskMutex.Unlock()
+
+		return queued || factory.Called("frontend")
+	}, time.Second, 10*time.Millisecond)
+}
+
+func TestStartScheduledTask_DoesNotScheduleConsumersWhenProviderParseFails(t *testing.T) {
+	checker := &runnerPortChecker{unavailable: map[int]bool{}}
+	factory := &failingCommandFactory{failTask: "backend"}
+	runner := testRunnerForPortsWithFactory(t, `
+tasks:
+  backend:
+    type: continuous
+    run: "go run . --port ${PORT}"
+    port:
+      preferred: 3000
+      range:
+        start: 3000
+        end: 3002
+  frontend:
+    type: continuous
+    run: "npm run dev"
+    consumes:
+      - task: backend
+        env:
+          VITE_API_URL: url
+`, checker, factory)
+
+	runner.startScheduledTask("backend", &ScheduledTask{TaskConfiguration: runner.Config.Tasks["backend"]})
+
+	assert.Eventually(t, func() bool {
+		runner.RunningTaskMutex.Lock()
+		backendRunning := runner.isTaskRunning("backend")
+		runner.RunningTaskMutex.Unlock()
+		return !backendRunning
+	}, time.Second, 10*time.Millisecond)
+
+	runner.ScheduledTaskMutex.Lock()
+	frontendQueued := runner.ScheduledTasks["frontend"] != nil
+	runner.ScheduledTaskMutex.Unlock()
+
+	assert.False(t, frontendQueued)
+	assert.False(t, factory.Called("frontend"))
+}
+
+func TestStartScheduledTasks_DoesNotStartProxyConsumerWhenProviderParseFails(t *testing.T) {
+	checker := &runnerPortChecker{unavailable: map[int]bool{}}
+	factory := &failingCommandFactory{failTask: "backend"}
+	runner := testRunnerForPortsWithFactory(t, fmt.Sprintf(`
+tasks:
+  backend:
+    type: continuous
+    run: "go run . --port ${PORT}"
+    port:
+      preferred: 3000
+      range:
+        start: 3000
+        end: 3002
+      expose:
+        name: backend
+        proxy:
+          enabled: true
+          env: API_PROXY_URL
+          preferred: %d
+  frontend:
+    type: continuous
+    run: "npm run dev"
+    consumes:
+      - task: backend
+        env:
+          VITE_API_URL: API_PROXY_URL
+`, freeRunnerPort(t)), checker, factory)
+	t.Cleanup(runner.closeManagedProxies)
+
+	runner.scheduleAllTasks()
+	runner.startScheduledTasks()
+
+	assert.True(t, factory.Called("backend"))
+	assert.False(t, factory.Called("frontend"))
+	assert.False(t, runner.canStartTask(&ScheduledTask{TaskConfiguration: runner.Config.Tasks["frontend"]}))
+
+	runner.serviceExportMutex.Lock()
+	exports := runner.serviceExports["backend"]
+	runner.serviceExportMutex.Unlock()
+	assert.Empty(t, exports)
+}
+
+func TestStartScheduledTasks_RemovesQueuedConsumersWhenProviderParseFails(t *testing.T) {
+	checker := &runnerPortChecker{unavailable: map[int]bool{}}
+	factory := &failingCommandFactory{failTask: "backend"}
+	runner := testRunnerForPortsWithFactory(t, `
+tasks:
+  backend:
+    type: continuous
+    run: "go run . --port ${PORT}"
+    port:
+      preferred: 3000
+  frontend:
+    type: continuous
+    run: "npm run dev"
+    port:
+      preferred: 3001
+    consumes:
+      - task: backend
+        env:
+          VITE_API_URL: url
+  client:
+    type: continuous
+    run: "npm run dev"
+    consumes:
+      - task: frontend
+        env:
+          FRONTEND_URL: url
+`, checker, factory)
+
+	runner.scheduleAllTasks()
+	runner.startScheduledTasks()
+
+	assert.True(t, factory.Called("backend"))
+	assert.False(t, factory.Called("frontend"))
+	assert.False(t, factory.Called("client"))
+
+	runner.ScheduledTaskMutex.Lock()
+	scheduledCount := len(runner.ScheduledTasks)
+	runner.ScheduledTaskMutex.Unlock()
+	assert.Zero(t, scheduledCount)
+
+	select {
+	case <-runner.completionChan:
+	case <-time.After(time.Second):
+		t.Fatal("expected single-run completion after provider failure removed queued consumers")
+	}
+}
