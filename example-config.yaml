@@ -21,6 +21,10 @@ shared:
   # Debounces filesystem events before affected tasks are scheduled.
   # Defaults to 200ms. Use 0ms to disable debounce globally.
   fs-debounce: 200ms
+  # Optional rebuild suppression skips tasks when matched inputs did not change.
+  rebuild-suppression:
+    enabled: true
+    mode: size-and-hash
 
 tasks:
   backend:
@@ -41,6 +45,8 @@ tasks:
       args: [build, -o, ./bin/app.exe]
     # Overrides shared.fs-debounce for this task.
     fs-debounce: 500ms
+    rebuild-suppression:
+      mode: language-aware-hash
     include: ^/.*\.go$
     # This depends on the code generation task
     dependencies:
@@ -57,4 +63,6 @@ tasks:
       - command: ./scripts/generate_code_sql_types.sh
       - command: echo
         args: [hello]
+    rebuild-suppression:
+      mode: language-aware-hash
     include: ^/schema/.*\.sql$

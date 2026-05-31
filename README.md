@@ -61,6 +61,11 @@ shared:
     # Debounces filesystem events before affected tasks are scheduled.
     # Defaults to 200ms. Use 0ms to disable debounce globally.
     fs-debounce: 200ms
+    # Optional: skip rebuilds when a task's effective inputs did not change.
+    # Defaults to disabled.
+    rebuild-suppression:
+      enabled: true
+      mode: size-and-hash
     # Excludes directories globally for all the configurations
     # For example if you want to ignore node_modules folder.
     # Supports glob patterns
@@ -93,10 +98,36 @@ tasks:
           args: [build, -o, ./bin/app]
         # Overrides shared.fs-debounce for this task.
         fs-debounce: 500ms
+        # Optional task override. language-aware-hash canonicalizes
+        # supported source files before hashing.
+        rebuild-suppression:
+          mode: language-aware-hash
         # Watches for all go file changes under the project root
         include: **.go
 
 ```
+
+### Rebuild suppression
+
+`rebuild-suppression` is opt-in and can be configured globally under `shared` or per task. When enabled, asynk fingerprints the files matched by a task's `include` minus `exclude` after applying shared excludes. If a filesystem event arrives but the fingerprint is unchanged, the task is not scheduled.
+
+```yaml
+shared:
+  rebuild-suppression:
+    enabled: true
+    mode: size-and-hash
+
+tasks:
+  go:
+    type: build
+    run: "go build ./..."
+    include:
+      - "**/*.go"
+    rebuild-suppression:
+      mode: language-aware-hash
+```
+
+`mode` can be `size-and-hash`, `size-and-mtime`, or `language-aware-hash`. Hash mode is more accurate and avoids timestamp-only rebuilds. `language-aware-hash` canonicalizes supported source files before hashing, currently Go, JS/TS script files, and SQL files, and falls back to raw hashing for unsupported extensions, JSX/TSX files, or source it cannot safely canonicalize. When this mode is used, asynk logs how long fingerprint construction took in milliseconds.
 
 ### Task commands, working directories, and environment
 

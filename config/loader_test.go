@@ -167,6 +167,92 @@ tasks:
 	assert.Contains(t, err.Error(), "fs-debounce cannot be negative")
 }
 
+func TestLoadFromBytes_RebuildSuppressionInheritance(t *testing.T) {
+	yml := []byte(`
+shared:
+  rebuild-suppression:
+    enabled: true
+    mode: language-aware-hash
+tasks:
+  inherited:
+    type: build
+    run: "echo inherited"
+  disabled:
+    type: build
+    run: "echo disabled"
+    rebuild-suppression:
+      enabled: false
+  override:
+    type: build
+    run: "echo override"
+    rebuild-suppression:
+      mode: size-and-mtime
+`)
+
+	cfg, err := LoadFromBytes(yml)
+	assert.NoError(t, err)
+
+	inherited := cfg.EffectiveRebuildSuppressionForTask("inherited")
+	assert.True(t, inherited.Enabled)
+	assert.Equal(t, RebuildSuppressionMode_LanguageAwareHash, inherited.Mode)
+
+	disabled := cfg.EffectiveRebuildSuppressionForTask("disabled")
+	assert.False(t, disabled.Enabled)
+
+	override := cfg.EffectiveRebuildSuppressionForTask("override")
+	assert.True(t, override.Enabled)
+	assert.Equal(t, RebuildSuppressionMode_SizeAndMTime, override.Mode)
+}
+
+func TestLoadFromBytes_RebuildSuppressionTaskDefaults(t *testing.T) {
+	yml := []byte(`
+tasks:
+  build:
+    type: build
+    run: "echo build"
+    rebuild-suppression:
+      enabled: true
+`)
+
+	cfg, err := LoadFromBytes(yml)
+	assert.NoError(t, err)
+
+	effective := cfg.EffectiveRebuildSuppressionForTask("build")
+	assert.True(t, effective.Enabled)
+	assert.Equal(t, RebuildSuppressionMode_SizeAndHash, effective.Mode)
+}
+
+func TestLoadFromBytes_RebuildSuppressionInvalid(t *testing.T) {
+	tests := []struct {
+		name string
+		yaml string
+		want string
+	}{
+		{
+			name: "mode",
+			yaml: `
+shared:
+  rebuild-suppression:
+    mode: checksum
+tasks:
+  build:
+    type: build
+    run: "echo build"
+`,
+			want: "rebuild-suppression mode",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := LoadFromBytes([]byte(tt.yaml))
+			assert.Error(t, err)
+			assert.Nil(t, cfg)
+			assert.Contains(t, err.Error(), tt.want)
+		})
+	}
+}
+
 func TestLoadFromBytes_InvalidYAML(t *testing.T) {
 	yml := []byte(`invalid: [yaml: broken`)
 	cfg, err := LoadFromBytes(yml)

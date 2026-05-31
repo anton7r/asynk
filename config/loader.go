@@ -53,6 +53,24 @@ const (
 	ConsumeExport_ProxyURL ConsumeExport = "proxy-url"
 )
 
+type RebuildSuppressionMode string
+
+const (
+	RebuildSuppressionMode_SizeAndHash       RebuildSuppressionMode = "size-and-hash"
+	RebuildSuppressionMode_SizeAndMTime      RebuildSuppressionMode = "size-and-mtime"
+	RebuildSuppressionMode_LanguageAwareHash RebuildSuppressionMode = "language-aware-hash"
+)
+
+type RebuildSuppressionConfig struct {
+	Enabled *bool                  `yaml:"enabled"`
+	Mode    RebuildSuppressionMode `yaml:"mode"`
+}
+
+type EffectiveRebuildSuppressionConfig struct {
+	Enabled bool
+	Mode    RebuildSuppressionMode
+}
+
 type PortRangeConfig struct {
 	Start int `yaml:"start"`
 	End   int `yaml:"end"`
@@ -97,6 +115,8 @@ type TaskConfig struct {
 	WorkingDir string      `yaml:"working-dir"`
 	// Debounce duration for filesystem events affecting this task.
 	FSDebounce util.Duration `yaml:"fs-debounce"`
+	// Optional suppression of rebuilds when effective task inputs did not change.
+	RebuildSuppression RebuildSuppressionConfig `yaml:"rebuild-suppression"`
 	// Glob pattern to match files to trigger the task
 	Include util.GlobArray `yaml:"include"`
 	// Glob pattern to exclude files from triggering the task
@@ -123,10 +143,11 @@ type SharedConfig struct {
 	// Shared configuration settings
 	Exclude util.GlobArray `yaml:"exclude"`
 	// TODO: this is not yet implemented
-	ReloadOnConfigChange bool             `yaml:"reload-on-config-change"`
-	LogLevel             string           `yaml:"log-level"`
-	EnvFiles             util.StringArray `yaml:"env-files"`
-	FSDebounce           util.Duration    `yaml:"fs-debounce"`
+	ReloadOnConfigChange bool                     `yaml:"reload-on-config-change"`
+	LogLevel             string                   `yaml:"log-level"`
+	EnvFiles             util.StringArray         `yaml:"env-files"`
+	FSDebounce           util.Duration            `yaml:"fs-debounce"`
+	RebuildSuppression   RebuildSuppressionConfig `yaml:"rebuild-suppression"`
 }
 
 // The tasks id comes from the keys in the YAML file.
@@ -227,4 +248,42 @@ func (config *Config) TaskFSDebounces() map[string]time.Duration {
 	return debounces
 }
 
-// persistent hashes could be a useful feature for large projects.
+func (config *Config) EffectiveRebuildSuppressionForTask(taskId string) EffectiveRebuildSuppressionConfig {
+	effective := EffectiveRebuildSuppressionConfig{
+		Enabled: false,
+		Mode:    RebuildSuppressionMode_SizeAndHash,
+	}
+
+	shared := config.Shared.RebuildSuppression
+	if shared.Enabled != nil {
+		effective.Enabled = *shared.Enabled
+	}
+	if shared.Mode != "" {
+		effective.Mode = shared.Mode
+	}
+
+	taskConfig := config.Tasks[taskId]
+	if taskConfig == nil {
+		return effective
+	}
+
+	taskSuppression := taskConfig.RebuildSuppression
+	if taskSuppression.Enabled != nil {
+		effective.Enabled = *taskSuppression.Enabled
+	}
+	if taskSuppression.Mode != "" {
+		effective.Mode = taskSuppression.Mode
+	}
+
+	return effective
+}
+
+func (config *Config) RebuildSuppressionTasks() map[string]bool {
+	tasks := make(map[string]bool)
+	for taskId := range config.Tasks {
+		if config.EffectiveRebuildSuppressionForTask(taskId).Enabled {
+			tasks[taskId] = true
+		}
+	}
+	return tasks
+}

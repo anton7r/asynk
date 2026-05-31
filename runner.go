@@ -53,6 +53,7 @@ type Runner struct {
 	deps               RunnerDeps
 	runOnce            bool
 	completionChan     chan struct{}
+	rebuildSuppression *rebuildSuppressionState
 }
 
 // RunnerDeps holds all injectable infrastructure dependencies for the Runner.
@@ -117,6 +118,7 @@ func NewRunnerWithDeps(configuration *config.Config, log *zap.Logger, runOnce bo
 		deps:               deps,
 		runOnce:            runOnce,
 		completionChan:     make(chan struct{}, 1),
+		rebuildSuppression: newRebuildSuppressionState(),
 	}
 
 	taskIds := make([]string, 0, len(configuration.Tasks))
@@ -139,14 +141,17 @@ func NewRunnerWithDeps(configuration *config.Config, log *zap.Logger, runOnce bo
 			deps.FS,
 			nil,
 			watcher.WatcherOptions{
-				DefaultFSDebounce:    defaultFSDebounce,
-				DefaultFSDebounceSet: true,
-				TaskFSDebounces:      configuration.TaskFSDebounces(),
+				DefaultFSDebounce:       defaultFSDebounce,
+				DefaultFSDebounceSet:    true,
+				TaskFSDebounces:         configuration.TaskFSDebounces(),
+				RebuildSuppressionTasks: configuration.RebuildSuppressionTasks(),
 			},
 		)
 		if err != nil {
 			log.Error("Error creating watcher", zap.Error(err))
 		}
+
+		runner.initializeRebuildSuppression()
 	}
 
 	runner.wrapLogger = cmdwrap.NewWrapLogger(taskIds)
@@ -328,6 +333,7 @@ func (runner *Runner) onFileChange(events map[string]watcher.AggregatedEvent) {
 	// TODO: We could optimize this by passing range funcs
 	schedulableTasks := runner.findTasksAffectedByFileChanges(events)
 	schedulableTasks = runner.filterRunningTasks(schedulableTasks)
+	schedulableTasks = runner.filterUnchangedRebuildInputs(schedulableTasks)
 
 	if len(schedulableTasks) == 0 {
 		runner.log.Info("No tasks to schedule based on file changes",
@@ -364,6 +370,7 @@ func (runner *Runner) onTaskFinished(taskIdentifier string, errored bool) {
 	runner.releaseFinishedTaskPorts(taskIdentifier, errored)
 
 	if errored {
+		runner.recordFailedRebuildSuppressionTaskResult(taskIdentifier)
 		runner.removeScheduledConsumersForFailedProvider(taskIdentifier)
 
 		// In single-run mode, check if all tasks are done
@@ -372,6 +379,8 @@ func (runner *Runner) onTaskFinished(taskIdentifier string, errored bool) {
 		}
 		return
 	}
+
+	runner.recordSuccessfulRebuildSuppressionTaskResult(taskIdentifier)
 
 	// Try to start tasks again if there are any scheduled tasks that can be started
 	runner.startScheduledTasks()
@@ -544,6 +553,7 @@ func (runner *Runner) startScheduledTask(taskId string, scheduledTask *Scheduled
 	runner.recordTaskStartTime(taskId)
 	newTask := runner.startTaskAsync(&ScheduledTask{TaskConfiguration: preparedTaskConfig}, globalEnv)
 	if newTask != nil {
+		runner.recordStartedRebuildSuppressionTask(taskId)
 		runner.onTaskStart(newTask)
 		if exportsChanged {
 			runner.scheduleConsumersForProvider(taskId)
