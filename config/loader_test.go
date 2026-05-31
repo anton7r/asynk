@@ -2,6 +2,7 @@ package config
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -72,6 +73,98 @@ tasks:
 	cfg, err := LoadFromBytes(yml)
 	assert.NoError(t, err)
 	assert.Equal(t, "info", cfg.Shared.LogLevel)
+}
+
+func TestLoadFromBytes_FSDebounce(t *testing.T) {
+	yml := []byte(`
+shared:
+  fs-debounce: 300ms
+
+tasks:
+  server:
+    type: continuous
+    fs-debounce: 1.5s
+    run: "go run ."
+  build:
+    type: build
+    run: "go build ."
+`)
+	cfg, err := LoadFromBytes(yml)
+
+	assert.NoError(t, err)
+	assert.True(t, cfg.Shared.FSDebounce.IsSet())
+	assert.Equal(t, 300*time.Millisecond, cfg.Shared.FSDebounce.Duration)
+	assert.True(t, cfg.Tasks["server"].FSDebounce.IsSet())
+	assert.Equal(t, 1500*time.Millisecond, cfg.Tasks["server"].FSDebounce.Duration)
+	assert.Equal(t, 1500*time.Millisecond, cfg.EffectiveFSDebounceForTask("server"))
+	assert.Equal(t, 300*time.Millisecond, cfg.EffectiveFSDebounceForTask("build"))
+	assert.Equal(t, map[string]time.Duration{
+		"server": 1500 * time.Millisecond,
+		"build":  300 * time.Millisecond,
+	}, cfg.TaskFSDebounces())
+}
+
+func TestLoadFromBytes_FSDebounceDefaultsTo200Milliseconds(t *testing.T) {
+	yml := []byte(`
+tasks:
+  app:
+    type: continuous
+    run: "echo hello"
+`)
+	cfg, err := LoadFromBytes(yml)
+
+	assert.NoError(t, err)
+	assert.False(t, cfg.Shared.FSDebounce.IsSet())
+	assert.False(t, cfg.Tasks["app"].FSDebounce.IsSet())
+	assert.Equal(t, 200*time.Millisecond, cfg.EffectiveFSDebounceForTask("app"))
+}
+
+func TestLoadFromBytes_FSDebounceAllowsZero(t *testing.T) {
+	yml := []byte(`
+shared:
+  fs-debounce: 0ms
+
+tasks:
+  app:
+    type: continuous
+    run: "echo hello"
+`)
+	cfg, err := LoadFromBytes(yml)
+
+	assert.NoError(t, err)
+	assert.True(t, cfg.Shared.FSDebounce.IsSet())
+	assert.Equal(t, time.Duration(0), cfg.EffectiveFSDebounceForTask("app"))
+}
+
+func TestLoadFromBytes_FSDebounceInvalid(t *testing.T) {
+	yml := []byte(`
+shared:
+  fs-debounce: tomorrow
+
+tasks:
+  app:
+    type: continuous
+    run: "echo hello"
+`)
+	cfg, err := LoadFromBytes(yml)
+
+	assert.Error(t, err)
+	assert.Nil(t, cfg)
+}
+
+func TestLoadFromBytes_FSDebounceNegative(t *testing.T) {
+	yml := []byte(`
+tasks:
+  app:
+    type: continuous
+    fs-debounce: -1ms
+    run: "echo hello"
+`)
+	cfg, err := LoadFromBytes(yml)
+
+	assert.Error(t, err)
+	assert.Nil(t, cfg)
+	assert.Contains(t, err.Error(), "fs-debounce cannot be negative")
 }
 
 func TestLoadFromBytes_InvalidYAML(t *testing.T) {

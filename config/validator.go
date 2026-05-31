@@ -152,6 +152,23 @@ func (v *validator) validateCleanUpTasks() error {
 	return nil
 }
 
+func (v *validator) validateFSDebounce() error {
+	if v.config.Shared.FSDebounce.IsSet() && v.config.Shared.FSDebounce.Duration < 0 {
+		return fmt.Errorf("invalid shared fs-debounce configuration, duration cannot be negative")
+	}
+
+	for _, taskConfig := range v.config.Tasks {
+		if taskConfig.FSDebounce.IsSet() && taskConfig.FSDebounce.Duration < 0 {
+			return fmt.Errorf(
+				"invalid task configuration, fs-debounce cannot be negative: %s",
+				taskConfig.Identifier,
+			)
+		}
+	}
+
+	return nil
+}
+
 func (v *validator) validatePortConfigs() error {
 	for _, taskConfig := range v.config.Tasks {
 		portConfig := taskConfig.Port
@@ -445,6 +462,7 @@ func validateConfig(config *Config) error {
 
 	validationSteps := []func() error{
 		validator.validateTaskId,
+		validator.validateFSDebounce,
 		validator.validateWorkingDirectories,
 		validator.validateRunCommand,
 		validator.validateTaskTypes,

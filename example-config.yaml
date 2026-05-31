@@ -18,6 +18,9 @@ shared:
   reload-on-config-change: true
   env-files:
     - .env
+  # Debounces filesystem events before affected tasks are scheduled.
+  # Defaults to 200ms. Use 0ms to disable debounce globally.
+  fs-debounce: 200ms
 
 tasks:
   backend:
@@ -36,6 +39,8 @@ tasks:
     run:
       command: go
       args: [build, -o, ./bin/app.exe]
+    # Overrides shared.fs-debounce for this task.
+    fs-debounce: 500ms
     include: ^/.*\.go$
     # This depends on the code generation task
     dependencies:

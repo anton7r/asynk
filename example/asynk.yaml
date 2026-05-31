@@ -6,6 +6,9 @@ shared:
   # need to set this, as this is by default
   # set to "info".
   log-level: info
+  # Debounces filesystem events before affected tasks are scheduled.
+  # Defaults to 200ms. Use 0ms to disable debounce globally.
+  fs-debounce: 200ms
   # Can only match folders
   exclude: node_modules
 
@@ -16,6 +19,8 @@ tasks:
     run:
       command: go
       args: [build, -o, app]
+    # Overrides shared.fs-debounce for this task.
+    fs-debounce: 500ms
     include: main.go
   test2:
     type: build

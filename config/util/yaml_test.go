@@ -2,6 +2,7 @@ package util
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"gopkg.in/yaml.v3"
@@ -51,6 +52,42 @@ func TestStringArray_UnmarshalYAML_InvalidType(t *testing.T) {
 	err := yaml.Unmarshal([]byte(input), &out)
 	assert.NoError(t, err)
 	assert.Equal(t, StringArray{"123"}, out.Value)
+}
+
+// --- Duration tests ---
+
+func TestDuration_UnmarshalYAML(t *testing.T) {
+	input := `duration: 1.5s`
+	var out struct {
+		Duration Duration `yaml:"duration"`
+	}
+
+	err := yaml.Unmarshal([]byte(input), &out)
+	assert.NoError(t, err)
+	assert.True(t, out.Duration.IsSet())
+	assert.Equal(t, 1500*time.Millisecond, out.Duration.Duration)
+}
+
+func TestDuration_UnmarshalYAML_Zero(t *testing.T) {
+	input := `duration: 0ms`
+	var out struct {
+		Duration Duration `yaml:"duration"`
+	}
+
+	err := yaml.Unmarshal([]byte(input), &out)
+	assert.NoError(t, err)
+	assert.True(t, out.Duration.IsSet())
+	assert.Equal(t, time.Duration(0), out.Duration.Duration)
+}
+
+func TestDuration_UnmarshalYAML_Invalid(t *testing.T) {
+	input := `duration: soon`
+	var out struct {
+		Duration Duration `yaml:"duration"`
+	}
+
+	err := yaml.Unmarshal([]byte(input), &out)
+	assert.Error(t, err)
 }
 
 // --- Glob tests ---
