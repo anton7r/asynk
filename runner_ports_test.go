@@ -598,3 +598,50 @@ tasks:
 	runner.serviceExportMutex.Unlock()
 	assert.Empty(t, exports)
 }
+
+func TestStartScheduledTasks_RemovesQueuedConsumersWhenProviderParseFails(t *testing.T) {
+	checker := &runnerPortChecker{unavailable: map[int]bool{}}
+	factory := &failingCommandFactory{failTask: "backend"}
+	runner := testRunnerForPortsWithFactory(t, `
+tasks:
+  backend:
+    type: continuous
+    run: "go run . --port ${PORT}"
+    port:
+      preferred: 3000
+  frontend:
+    type: continuous
+    run: "npm run dev"
+    port:
+      preferred: 3001
+    consumes:
+      - task: backend
+        env:
+          VITE_API_URL: url
+  client:
+    type: continuous
+    run: "npm run dev"
+    consumes:
+      - task: frontend
+        env:
+          FRONTEND_URL: url
+`, checker, factory)
+
+	runner.scheduleAllTasks()
+	runner.startScheduledTasks()
+
+	assert.True(t, factory.Called("backend"))
+	assert.False(t, factory.Called("frontend"))
+	assert.False(t, factory.Called("client"))
+
+	runner.ScheduledTaskMutex.Lock()
+	scheduledCount := len(runner.ScheduledTasks)
+	runner.ScheduledTaskMutex.Unlock()
+	assert.Zero(t, scheduledCount)
+
+	select {
+	case <-runner.completionChan:
+	case <-time.After(time.Second):
+		t.Fatal("expected single-run completion after provider failure removed queued consumers")
+	}
+}

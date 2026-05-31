@@ -349,6 +349,8 @@ func (runner *Runner) onTaskFinished(taskIdentifier string, errored bool) {
 	runner.releaseFinishedTaskPorts(taskIdentifier, errored)
 
 	if errored {
+		runner.removeScheduledConsumersForFailedProvider(taskIdentifier)
+
 		// In single-run mode, check if all tasks are done
 		if runner.runOnce {
 			runner.checkCompletion()
@@ -374,6 +376,45 @@ func (runner *Runner) onTaskFinished(taskIdentifier string, errored bool) {
 			}
 		}
 	}
+}
+
+func (runner *Runner) removeScheduledConsumersForFailedProvider(providerTaskID string) {
+	runner.ScheduledTaskMutex.Lock()
+	defer runner.ScheduledTaskMutex.Unlock()
+
+	runner.removeScheduledConsumersForFailedProviderLocked(providerTaskID)
+}
+
+func (runner *Runner) removeScheduledConsumersForFailedProviderLocked(providerTaskID string) {
+	consumerTaskIDs := make([]string, 0)
+	for taskID, scheduledTask := range runner.ScheduledTasks {
+		if scheduledTask == nil || !taskConsumesProvider(scheduledTask.TaskConfiguration, providerTaskID) {
+			continue
+		}
+		consumerTaskIDs = append(consumerTaskIDs, taskID)
+	}
+
+	for _, taskID := range consumerTaskIDs {
+		delete(runner.ScheduledTasks, taskID)
+		runner.log.Warn("Removing queued consumer because provider failed",
+			zap.String("taskId", taskID),
+			zap.String("providerTaskId", providerTaskID),
+		)
+		runner.removeScheduledConsumersForFailedProviderLocked(taskID)
+	}
+}
+
+func taskConsumesProvider(taskConfig *config.TaskConfig, providerTaskID string) bool {
+	if taskConfig == nil {
+		return false
+	}
+
+	for _, consume := range taskConfig.Consumes {
+		if consume.Task == providerTaskID {
+			return true
+		}
+	}
+	return false
 }
 
 func (runner *Runner) startCleanUp() {
