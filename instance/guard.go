@@ -30,7 +30,7 @@ const (
 )
 
 type ProcessProbe interface {
-	Alive(pid int) bool
+	Matches(pid int, startTime time.Time) bool
 }
 
 type Options struct {
@@ -42,6 +42,8 @@ type Options struct {
 	RootDir        string
 	PID            int
 	Token          string
+
+	beforeStaleRemove func()
 }
 
 type Guard struct {
@@ -83,11 +85,10 @@ func Acquire(options Options) (*Guard, error) {
 		options.PID = os.Getpid()
 	}
 
-	configDir, err := filepath.Abs(options.ConfigDir)
+	configDir, err := canonicalConfigDir(options.ConfigDir)
 	if err != nil {
 		return nil, fmt.Errorf("resolving config directory: %w", err)
 	}
-	configDir = filepath.Clean(configDir)
 
 	lockDir, err := lockDir(options.RootDir, configDir)
 	if err != nil {
@@ -118,20 +119,28 @@ func Acquire(options Options) (*Guard, error) {
 			return guard, nil
 		}
 
-		owner, err := readOwner(guard.ownerPath)
+		owner, ownerData, err := readOwnerData(guard.ownerPath)
 		if err != nil {
-			if errors.Is(err, os.ErrNotExist) {
-				if removeErr := os.RemoveAll(lockDir); removeErr != nil {
+			if errors.Is(err, os.ErrNotExist) || isMalformedOwner(err) {
+				removed, removeErr := guard.removeStaleLockIfUnchanged(ownerData, options.beforeStaleRemove)
+				if removeErr != nil {
 					return nil, fmt.Errorf("removing incomplete instance lock: %w", removeErr)
+				}
+				if !removed {
+					continue
 				}
 				continue
 			}
 			return nil, fmt.Errorf("reading instance owner: %w", err)
 		}
 
-		if !options.Probe.Alive(owner.PID) {
-			if err := os.RemoveAll(lockDir); err != nil {
+		if !options.Probe.Matches(owner.PID, owner.StartTime) {
+			removed, err := guard.removeStaleLockIfUnchanged(ownerData, options.beforeStaleRemove)
+			if err != nil {
 				return nil, fmt.Errorf("removing stale instance lock: %w", err)
+			}
+			if !removed {
+				continue
 			}
 			continue
 		}
@@ -170,6 +179,29 @@ func (g *Guard) Release() error {
 	}
 
 	return os.RemoveAll(g.lockDir)
+}
+
+func (g *Guard) removeStaleLockIfUnchanged(expectedOwnerData []byte, beforeRemove func()) (bool, error) {
+	if beforeRemove != nil {
+		beforeRemove()
+	}
+
+	currentOwnerData, err := os.ReadFile(g.ownerPath)
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			return false, err
+		}
+		if expectedOwnerData != nil {
+			return false, nil
+		}
+	} else if string(currentOwnerData) != string(expectedOwnerData) {
+		return false, nil
+	}
+
+	if err := os.RemoveAll(g.lockDir); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (g *Guard) StartShutdownMonitor(ctx context.Context, onShutdown func()) {
@@ -259,19 +291,41 @@ func lockDir(rootDir, configDir string) (string, error) {
 }
 
 func readOwner(path string) (Owner, error) {
+	owner, _, err := readOwnerData(path)
+	return owner, err
+}
+
+func readOwnerData(path string) (Owner, []byte, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return Owner{}, err
+		return Owner{}, nil, err
 	}
 
 	var owner Owner
 	if err := json.Unmarshal(data, &owner); err != nil {
-		return Owner{}, err
+		return Owner{}, data, malformedOwnerError{err}
 	}
 	if owner.PID <= 0 || owner.Token == "" {
-		return Owner{}, fmt.Errorf("instance owner metadata is incomplete")
+		return Owner{}, data, malformedOwnerError{fmt.Errorf("instance owner metadata is incomplete")}
 	}
-	return owner, nil
+	return owner, data, nil
+}
+
+type malformedOwnerError struct {
+	err error
+}
+
+func (e malformedOwnerError) Error() string {
+	return e.err.Error()
+}
+
+func (e malformedOwnerError) Unwrap() error {
+	return e.err
+}
+
+func isMalformedOwner(err error) bool {
+	var malformed malformedOwnerError
+	return errors.As(err, &malformed)
 }
 
 func requestShutdown(owner Owner, requestedBy int, requestedAt time.Time) error {
@@ -317,4 +371,18 @@ func randomToken() (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(bytes[:]), nil
+}
+
+func canonicalConfigDir(configDir string) (string, error) {
+	absolute, err := filepath.Abs(configDir)
+	if err != nil {
+		return "", err
+	}
+
+	realPath, err := filepath.EvalSymlinks(absolute)
+	if err != nil {
+		return "", err
+	}
+
+	return filepath.Clean(realPath), nil
 }
