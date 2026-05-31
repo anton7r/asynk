@@ -13,8 +13,6 @@ shared:
   rebuild-suppression:
     enabled: true
     mode: size-and-hash
-    normalize: none
-    after-failure: rebuild
   # Can only match folders
   exclude: node_modules
 
@@ -27,9 +25,9 @@ tasks:
       args: [build, -o, app]
     # Overrides shared.fs-debounce for this task.
     fs-debounce: 500ms
-    # Whitespace-only Go source rewrites should not force this example rebuild.
+    # Formatting-only Go source rewrites should not force this example rebuild.
     rebuild-suppression:
-      normalize: ignore-whitespace
+      mode: language-aware-hash
     include: main.go
   test2:
     type: build

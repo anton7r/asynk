@@ -62,12 +62,10 @@ shared:
     # Defaults to 200ms. Use 0ms to disable debounce globally.
     fs-debounce: 200ms
     # Optional: skip rebuilds when a task's effective inputs did not change.
-    # Defaults to disabled. after-failure defaults to rebuild when enabled.
+    # Defaults to disabled.
     rebuild-suppression:
       enabled: true
       mode: size-and-hash
-      normalize: none
-      after-failure: rebuild
     # Excludes directories globally for all the configurations
     # For example if you want to ignore node_modules folder.
     # Supports glob patterns
@@ -100,10 +98,10 @@ tasks:
           args: [build, -o, ./bin/app]
         # Overrides shared.fs-debounce for this task.
         fs-debounce: 500ms
-        # Optional task override. Use normalization only when ignored
-        # characters are not meaningful for this task's inputs.
+        # Optional task override. language-aware-hash canonicalizes
+        # supported source files before hashing.
         rebuild-suppression:
-          normalize: ignore-whitespace
+          mode: language-aware-hash
         # Watches for all go file changes under the project root
         include: **.go
 
@@ -118,8 +116,6 @@ shared:
   rebuild-suppression:
     enabled: true
     mode: size-and-hash
-    normalize: none
-    after-failure: rebuild
 
 tasks:
   go:
@@ -128,10 +124,10 @@ tasks:
     include:
       - "**/*.go"
     rebuild-suppression:
-      normalize: ignore-whitespace
+      mode: language-aware-hash
 ```
 
-`mode` can be `size-and-hash` or `size-and-mtime`. Hash mode is more accurate and avoids timestamp-only rebuilds. `normalize` can be `none`, `ignore-whitespace`, or `ignore-non-alnum`; normalization is only useful for text inputs and falls back to raw bytes for invalid UTF-8. `after-failure` can be `rebuild` or `suppress`; the default `rebuild` retries unchanged inputs after a failed task so debugging remains straightforward.
+`mode` can be `size-and-hash`, `size-and-mtime`, or `language-aware-hash`. Hash mode is more accurate and avoids timestamp-only rebuilds. `language-aware-hash` canonicalizes supported source files before hashing, currently Go, JS/TS-family, and SQL files, and falls back to raw hashing for unsupported extensions or source it cannot safely canonicalize. When this mode is used, asynk logs how long fingerprint construction took in milliseconds.
 
 ### Task commands, working directories, and environment
 
