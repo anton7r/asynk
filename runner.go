@@ -362,8 +362,6 @@ func (runner *Runner) onTaskStart(runningTask *task.RunningTask) {
 }
 
 func (runner *Runner) onTaskFinished(taskIdentifier string, errored bool) {
-	runner.recordRebuildSuppressionTaskResult(taskIdentifier, errored)
-
 	runner.RunningTaskMutex.Lock()
 	runner.RunningTasks = task.RemoveRunningTask(runner.RunningTasks, taskIdentifier)
 	runningCount := len(runner.RunningTasks)

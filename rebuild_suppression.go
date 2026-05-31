@@ -9,8 +9,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"unicode"
-	"unicode/utf8"
+	"time"
 
 	"github.com/anton7r/asynk/config"
 	configutil "github.com/anton7r/asynk/config/util"
@@ -29,15 +28,28 @@ type FileFingerprint struct {
 }
 
 type rebuildSuppressionTaskState struct {
-	LastObserved   *TaskFingerprint
-	LastSuccessful *TaskFingerprint
-	LastFailed     *TaskFingerprint
+	LastAccepted *TaskFingerprint
 }
 
 type rebuildSuppressionState struct {
 	mu    sync.Mutex
 	tasks map[string]*rebuildSuppressionTaskState
 }
+
+type rebuildSuppressionFingerprintStats struct {
+	TotalFiles         int
+	LanguageAwareFiles int
+	FallbackFiles      int
+	Duration           time.Duration
+}
+
+type fileFingerprintMethod int
+
+const (
+	fileFingerprintMethodRaw fileFingerprintMethod = iota
+	fileFingerprintMethodMetadata
+	fileFingerprintMethodLanguageAware
+)
 
 func newRebuildSuppressionState() *rebuildSuppressionState {
 	return &rebuildSuppressionState{
@@ -52,11 +64,10 @@ func (runner *Runner) initializeRebuildSuppression() {
 			continue
 		}
 
-		fingerprint, err := fingerprintTaskInputs(
+		fingerprint, err := runner.computeRebuildSuppressionFingerprint(
+			taskId,
 			taskConfig,
-			runner.Config.Shared.Exclude,
 			effective,
-			runner.deps.FS,
 		)
 		if err != nil {
 			runner.log.Warn("Failed to initialize rebuild suppression fingerprint",
@@ -68,7 +79,7 @@ func (runner *Runner) initializeRebuildSuppression() {
 
 		runner.rebuildSuppression.mu.Lock()
 		state := runner.rebuildSuppressionTaskStateLocked(taskId)
-		state.LastObserved = fingerprint
+		state.LastAccepted = fingerprint
 		runner.rebuildSuppression.mu.Unlock()
 	}
 }
@@ -94,11 +105,10 @@ func (runner *Runner) shouldScheduleAfterRebuildSuppression(
 		return true
 	}
 
-	fingerprint, err := fingerprintTaskInputs(
+	fingerprint, err := runner.computeRebuildSuppressionFingerprint(
+		taskId,
 		taskConfig,
-		runner.Config.Shared.Exclude,
 		effective,
-		runner.deps.FS,
 	)
 	if err != nil {
 		runner.log.Warn("Failed to compute rebuild suppression fingerprint; scheduling task",
@@ -112,68 +122,40 @@ func (runner *Runner) shouldScheduleAfterRebuildSuppression(
 	defer runner.rebuildSuppression.mu.Unlock()
 
 	state := runner.rebuildSuppressionTaskStateLocked(taskId)
-	state.LastObserved = fingerprint
-
-	if fingerprintsEqual(state.LastFailed, fingerprint) {
-		if effective.AfterFailure == config.RebuildSuppressionAfterFailure_Suppress {
-			runner.log.Info("Skipping task because failed effective inputs are unchanged",
-				zap.String("taskId", taskId),
-			)
-			return false
-		}
-		return true
-	}
-
-	if fingerprintsEqual(state.LastSuccessful, fingerprint) {
+	if fingerprintsEqual(state.LastAccepted, fingerprint) {
 		runner.log.Info("Skipping task because effective inputs are unchanged",
 			zap.String("taskId", taskId),
 		)
 		return false
 	}
 
+	state.LastAccepted = fingerprint
 	return true
 }
 
-func (runner *Runner) recordRebuildSuppressionTaskResult(taskId string, errored bool) {
-	taskConfig := runner.Config.Tasks[taskId]
-	if taskConfig == nil {
-		return
-	}
-
-	effective := runner.Config.EffectiveRebuildSuppressionForTask(taskId)
-	if !effective.Enabled {
-		return
-	}
-
-	fingerprint, err := fingerprintTaskInputs(
+func (runner *Runner) computeRebuildSuppressionFingerprint(
+	taskId string,
+	taskConfig *config.TaskConfig,
+	effective config.EffectiveRebuildSuppressionConfig,
+) (*TaskFingerprint, error) {
+	fingerprint, stats, err := fingerprintTaskInputs(
 		taskConfig,
 		runner.Config.Shared.Exclude,
 		effective,
 		runner.deps.FS,
 	)
-	if err != nil {
-		runner.log.Warn("Failed to record rebuild suppression task result",
+
+	if effective.Mode == config.RebuildSuppressionMode_LanguageAwareHash {
+		runner.log.Info("Constructed language-aware rebuild suppression fingerprint",
 			zap.String("taskId", taskId),
-			zap.Bool("errored", errored),
-			zap.Error(err),
+			zap.Int("totalFiles", stats.TotalFiles),
+			zap.Int("languageAwareFiles", stats.LanguageAwareFiles),
+			zap.Int("fallbackFiles", stats.FallbackFiles),
+			zap.Int64("durationMs", stats.Duration.Milliseconds()),
 		)
-		return
 	}
 
-	runner.rebuildSuppression.mu.Lock()
-	defer runner.rebuildSuppression.mu.Unlock()
-
-	state := runner.rebuildSuppressionTaskStateLocked(taskId)
-	state.LastObserved = fingerprint
-	if errored {
-		state.LastFailed = fingerprint
-		return
-	}
-
-	state.LastSuccessful = fingerprint
-	if fingerprintsEqual(state.LastFailed, fingerprint) {
-		state.LastFailed = nil
-	}
+	return fingerprint, err
 }
 
 func (runner *Runner) rebuildSuppressionTaskStateLocked(taskId string) *rebuildSuppressionTaskState {
@@ -190,10 +172,13 @@ func fingerprintTaskInputs(
 	globalExclude configutil.GlobArray,
 	effective config.EffectiveRebuildSuppressionConfig,
 	fs util.FileSystem,
-) (*TaskFingerprint, error) {
+) (*TaskFingerprint, rebuildSuppressionFingerprintStats, error) {
 	if fs == nil {
 		fs = util.NewOSFileSystem()
 	}
+
+	stats := rebuildSuppressionFingerprintStats{}
+	start := time.Now()
 
 	fingerprint := &TaskFingerprint{Files: make(map[string]FileFingerprint)}
 	err := fs.Walk("./", func(pathStr string, info os.FileInfo, err error) error {
@@ -215,18 +200,29 @@ func fingerprintTaskInputs(
 			return nil
 		}
 
-		fileFingerprint, err := fingerprintFile(pathStr, info, effective, fs)
+		stats.TotalFiles++
+		fileFingerprint, method, err := fingerprintFile(pathStr, info, effective, fs)
 		if err != nil {
 			return err
+		}
+		if effective.Mode == config.RebuildSuppressionMode_LanguageAwareHash {
+			switch method {
+			case fileFingerprintMethodLanguageAware:
+				stats.LanguageAwareFiles++
+			case fileFingerprintMethodRaw:
+				stats.FallbackFiles++
+			}
 		}
 		fingerprint.Files[normalizedPath] = fileFingerprint
 		return nil
 	})
 	if err != nil {
-		return nil, err
+		stats.Duration = time.Since(start)
+		return nil, stats, err
 	}
 
-	return fingerprint, nil
+	stats.Duration = time.Since(start)
+	return fingerprint, stats, nil
 }
 
 func fingerprintFile(
@@ -234,56 +230,36 @@ func fingerprintFile(
 	info os.FileInfo,
 	effective config.EffectiveRebuildSuppressionConfig,
 	fs util.FileSystem,
-) (FileFingerprint, error) {
+) (FileFingerprint, fileFingerprintMethod, error) {
 	fileFingerprint := FileFingerprint{
 		Size:        info.Size(),
 		ModTimeNano: info.ModTime().UnixNano(),
 	}
 
 	if effective.Mode == config.RebuildSuppressionMode_SizeAndMTime {
-		return fileFingerprint, nil
+		return fileFingerprint, fileFingerprintMethodMetadata, nil
 	}
 
 	content, err := fs.ReadFile(pathStr)
 	if err != nil {
-		return FileFingerprint{}, fmt.Errorf("read %s: %w", pathStr, err)
+		return FileFingerprint{}, fileFingerprintMethodRaw, fmt.Errorf("read %s: %w", pathStr, err)
 	}
-	content = normalizeFingerprintContent(content, effective.Normalize)
+
+	method := fileFingerprintMethodRaw
+	if effective.Mode == config.RebuildSuppressionMode_LanguageAwareHash {
+		if fingerprint, ok := languageAwareFingerprintHash(pathStr, content); ok {
+			fileFingerprint.Size = fingerprint.Size
+			fileFingerprint.ModTimeNano = 0
+			fileFingerprint.Hash = fingerprint.Hash
+			return fileFingerprint, fileFingerprintMethodLanguageAware, nil
+		}
+	}
 
 	fileFingerprint.Size = int64(len(content))
 	fileFingerprint.ModTimeNano = 0
 	sum := sha256.Sum256(content)
 	fileFingerprint.Hash = hex.EncodeToString(sum[:])
-	return fileFingerprint, nil
-}
-
-func normalizeFingerprintContent(content []byte, normalize config.RebuildSuppressionNormalize) []byte {
-	switch normalize {
-	case config.RebuildSuppressionNormalize_IgnoreWS:
-		return filterUTF8Content(content, func(r rune) bool {
-			return !unicode.IsSpace(r)
-		})
-	case config.RebuildSuppressionNormalize_IgnoreNonAlnum:
-		return filterUTF8Content(content, func(r rune) bool {
-			return unicode.IsLetter(r) || unicode.IsDigit(r)
-		})
-	default:
-		return content
-	}
-}
-
-func filterUTF8Content(content []byte, keep func(rune) bool) []byte {
-	if !utf8.Valid(content) {
-		return content
-	}
-
-	var builder strings.Builder
-	for _, r := range string(content) {
-		if keep(r) {
-			builder.WriteRune(r)
-		}
-	}
-	return []byte(builder.String())
+	return fileFingerprint, method, nil
 }
 
 func pathMatchesAny(globs configutil.GlobArray, originalPath string, normalizedPath string) bool {

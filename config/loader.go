@@ -56,37 +56,19 @@ const (
 type RebuildSuppressionMode string
 
 const (
-	RebuildSuppressionMode_SizeAndHash  RebuildSuppressionMode = "size-and-hash"
-	RebuildSuppressionMode_SizeAndMTime RebuildSuppressionMode = "size-and-mtime"
-)
-
-type RebuildSuppressionNormalize string
-
-const (
-	RebuildSuppressionNormalize_None           RebuildSuppressionNormalize = "none"
-	RebuildSuppressionNormalize_IgnoreWS       RebuildSuppressionNormalize = "ignore-whitespace"
-	RebuildSuppressionNormalize_IgnoreNonAlnum RebuildSuppressionNormalize = "ignore-non-alnum"
-)
-
-type RebuildSuppressionAfterFailure string
-
-const (
-	RebuildSuppressionAfterFailure_Rebuild  RebuildSuppressionAfterFailure = "rebuild"
-	RebuildSuppressionAfterFailure_Suppress RebuildSuppressionAfterFailure = "suppress"
+	RebuildSuppressionMode_SizeAndHash       RebuildSuppressionMode = "size-and-hash"
+	RebuildSuppressionMode_SizeAndMTime      RebuildSuppressionMode = "size-and-mtime"
+	RebuildSuppressionMode_LanguageAwareHash RebuildSuppressionMode = "language-aware-hash"
 )
 
 type RebuildSuppressionConfig struct {
-	Enabled      *bool                          `yaml:"enabled"`
-	Mode         RebuildSuppressionMode         `yaml:"mode"`
-	Normalize    RebuildSuppressionNormalize    `yaml:"normalize"`
-	AfterFailure RebuildSuppressionAfterFailure `yaml:"after-failure"`
+	Enabled *bool                  `yaml:"enabled"`
+	Mode    RebuildSuppressionMode `yaml:"mode"`
 }
 
 type EffectiveRebuildSuppressionConfig struct {
-	Enabled      bool
-	Mode         RebuildSuppressionMode
-	Normalize    RebuildSuppressionNormalize
-	AfterFailure RebuildSuppressionAfterFailure
+	Enabled bool
+	Mode    RebuildSuppressionMode
 }
 
 type PortRangeConfig struct {
@@ -268,10 +250,8 @@ func (config *Config) TaskFSDebounces() map[string]time.Duration {
 
 func (config *Config) EffectiveRebuildSuppressionForTask(taskId string) EffectiveRebuildSuppressionConfig {
 	effective := EffectiveRebuildSuppressionConfig{
-		Enabled:      false,
-		Mode:         RebuildSuppressionMode_SizeAndHash,
-		Normalize:    RebuildSuppressionNormalize_None,
-		AfterFailure: RebuildSuppressionAfterFailure_Rebuild,
+		Enabled: false,
+		Mode:    RebuildSuppressionMode_SizeAndHash,
 	}
 
 	shared := config.Shared.RebuildSuppression
@@ -280,12 +260,6 @@ func (config *Config) EffectiveRebuildSuppressionForTask(taskId string) Effectiv
 	}
 	if shared.Mode != "" {
 		effective.Mode = shared.Mode
-	}
-	if shared.Normalize != "" {
-		effective.Normalize = shared.Normalize
-	}
-	if shared.AfterFailure != "" {
-		effective.AfterFailure = shared.AfterFailure
 	}
 
 	taskConfig := config.Tasks[taskId]
@@ -299,12 +273,6 @@ func (config *Config) EffectiveRebuildSuppressionForTask(taskId string) Effectiv
 	}
 	if taskSuppression.Mode != "" {
 		effective.Mode = taskSuppression.Mode
-	}
-	if taskSuppression.Normalize != "" {
-		effective.Normalize = taskSuppression.Normalize
-	}
-	if taskSuppression.AfterFailure != "" {
-		effective.AfterFailure = taskSuppression.AfterFailure
 	}
 
 	return effective

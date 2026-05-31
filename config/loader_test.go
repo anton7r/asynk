@@ -172,9 +172,7 @@ func TestLoadFromBytes_RebuildSuppressionInheritance(t *testing.T) {
 shared:
   rebuild-suppression:
     enabled: true
-    mode: size-and-hash
-    normalize: ignore-whitespace
-    after-failure: rebuild
+    mode: language-aware-hash
 tasks:
   inherited:
     type: build
@@ -189,8 +187,6 @@ tasks:
     run: "echo override"
     rebuild-suppression:
       mode: size-and-mtime
-      normalize: none
-      after-failure: suppress
 `)
 
 	cfg, err := LoadFromBytes(yml)
@@ -198,9 +194,7 @@ tasks:
 
 	inherited := cfg.EffectiveRebuildSuppressionForTask("inherited")
 	assert.True(t, inherited.Enabled)
-	assert.Equal(t, RebuildSuppressionMode_SizeAndHash, inherited.Mode)
-	assert.Equal(t, RebuildSuppressionNormalize_IgnoreWS, inherited.Normalize)
-	assert.Equal(t, RebuildSuppressionAfterFailure_Rebuild, inherited.AfterFailure)
+	assert.Equal(t, RebuildSuppressionMode_LanguageAwareHash, inherited.Mode)
 
 	disabled := cfg.EffectiveRebuildSuppressionForTask("disabled")
 	assert.False(t, disabled.Enabled)
@@ -208,8 +202,6 @@ tasks:
 	override := cfg.EffectiveRebuildSuppressionForTask("override")
 	assert.True(t, override.Enabled)
 	assert.Equal(t, RebuildSuppressionMode_SizeAndMTime, override.Mode)
-	assert.Equal(t, RebuildSuppressionNormalize_None, override.Normalize)
-	assert.Equal(t, RebuildSuppressionAfterFailure_Suppress, override.AfterFailure)
 }
 
 func TestLoadFromBytes_RebuildSuppressionTaskDefaults(t *testing.T) {
@@ -228,8 +220,6 @@ tasks:
 	effective := cfg.EffectiveRebuildSuppressionForTask("build")
 	assert.True(t, effective.Enabled)
 	assert.Equal(t, RebuildSuppressionMode_SizeAndHash, effective.Mode)
-	assert.Equal(t, RebuildSuppressionNormalize_None, effective.Normalize)
-	assert.Equal(t, RebuildSuppressionAfterFailure_Rebuild, effective.AfterFailure)
 }
 
 func TestLoadFromBytes_RebuildSuppressionInvalid(t *testing.T) {
@@ -250,31 +240,6 @@ tasks:
     run: "echo build"
 `,
 			want: "rebuild-suppression mode",
-		},
-		{
-			name: "normalize",
-			yaml: `
-shared:
-  rebuild-suppression:
-    normalize: ignore-comments
-tasks:
-  build:
-    type: build
-    run: "echo build"
-`,
-			want: "rebuild-suppression normalize",
-		},
-		{
-			name: "after failure",
-			yaml: `
-tasks:
-  build:
-    type: build
-    run: "echo build"
-    rebuild-suppression:
-      after-failure: retry
-`,
-			want: "rebuild-suppression after-failure",
 		},
 	}
 
