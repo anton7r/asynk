@@ -777,6 +777,110 @@ func TestWatcherFSDebounceForTasks_AllowsZeroTaskDebounce(t *testing.T) {
 	w.Close()
 }
 
+func TestWatcherFSDebounce_PendingSlowEventIsNotFlushedByFastEvent(t *testing.T) {
+	logger := zap.NewNop()
+	mfs := newMockFS()
+	fw := newTestFsWatcher()
+	dirs := &WatchableDirectories{
+		directories: map[string]WatchableDirectory{
+			"src": {
+				MatchedDirectory: "src",
+				RelativePath:     "./src",
+				TaskIds:          map[string]bool{"slow": true},
+			},
+			"assets": {
+				MatchedDirectory: "assets",
+				RelativePath:     "./assets",
+				TaskIds:          map[string]bool{"fast": true},
+			},
+		},
+	}
+
+	eventsChan := make(chan map[string]AggregatedEvent, 1)
+	w, err := NewWatcherWithDepsAndOptions(
+		logger,
+		dirs,
+		func(events map[string]AggregatedEvent) { eventsChan <- events },
+		mfs,
+		fw,
+		WatcherOptions{
+			TaskFSDebounces: map[string]time.Duration{
+				"slow": 120 * time.Millisecond,
+				"fast": 0,
+			},
+		},
+	)
+	assert.NoError(t, err)
+	defer w.Close()
+
+	now := time.Now()
+	w.checkIfWeNeedToNotify("src/main.go", "src", now)
+	time.Sleep(10 * time.Millisecond)
+	w.checkIfWeNeedToNotify("assets/app.css", "assets", now)
+
+	select {
+	case <-eventsChan:
+		t.Fatal("fast event flushed pending slow event before the slow debounce elapsed")
+	case <-time.After(60 * time.Millisecond):
+	}
+
+	select {
+	case events := <-eventsChan:
+		assert.Contains(t, events, "src")
+		assert.Contains(t, events, "assets")
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("timed out waiting for debounced events")
+	}
+}
+
+func TestWatcherFSDebounce_UsesChangedFileMatchingTasks(t *testing.T) {
+	logger := zap.NewNop()
+	mfs := newMockFS()
+	mfs.addDir("src")
+	mfs.addFile("src/main.go", time.Now())
+	mfs.addFile("src/style.css", time.Now())
+
+	taskConfigs := TaskConfigMap{
+		"go": &config.TaskConfig{
+			Include: configutil.NewGlobArray("**/*.go"),
+			Exclude: configutil.NewGlobArray(),
+		},
+		"css": &config.TaskConfig{
+			Include: configutil.NewGlobArray("**/*.css"),
+			Exclude: configutil.NewGlobArray(),
+		},
+	}
+	dirs := MatchWatchableDirectoriesWithFS(logger, configutil.GlobArray{}, taskConfigs, mfs)
+
+	eventsChan := make(chan map[string]AggregatedEvent, 1)
+	fw := newTestFsWatcher()
+	w, err := NewWatcherWithDepsAndOptions(
+		logger,
+		dirs,
+		func(events map[string]AggregatedEvent) { eventsChan <- events },
+		mfs,
+		fw,
+		WatcherOptions{
+			TaskFSDebounces: map[string]time.Duration{
+				"go":  120 * time.Millisecond,
+				"css": 0,
+			},
+		},
+	)
+	assert.NoError(t, err)
+	defer w.Close()
+
+	w.checkIfWeNeedToNotify("src/style.css", "src", time.Now())
+
+	select {
+	case events := <-eventsChan:
+		assert.Contains(t, events, "src")
+		assert.Contains(t, events["src"].Files, "src/style.css")
+	case <-time.After(40 * time.Millisecond):
+		t.Fatal("css-only change waited for unrelated go task debounce")
+	}
+}
+
 func TestNewWatcherWithDeps_NilFsWatcherCreatesReal(t *testing.T) {
 	logger := zap.NewNop()
 	mfs := newMockFS()

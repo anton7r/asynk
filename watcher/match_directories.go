@@ -21,6 +21,7 @@ type WatchableDirectory struct {
 
 type WatchableDirectories struct {
 	directories map[string]WatchableDirectory
+	taskConfigs TaskConfigMap
 }
 
 type TaskConfigMap = map[string]*config.TaskConfig
@@ -150,7 +151,10 @@ func MatchWatchableDirectoriesWithFS(
 	if fs == nil {
 		fs = asynkutil.NewOSFileSystem()
 	}
-	watchable := &WatchableDirectories{directories: make(map[string]WatchableDirectory)}
+	watchable := &WatchableDirectories{
+		directories: make(map[string]WatchableDirectory),
+		taskConfigs: taskConfigs,
+	}
 
 	// List all items in the directory - assume current directory
 	if err := fs.Walk("./", newWatchableDirectoryMatcher(watchable, globallyExcluded, taskConfigs, log)); err != nil {

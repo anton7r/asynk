@@ -42,10 +42,7 @@ type AggregatedEvent struct {
 	Dir string
 	// Relative path to the where the asynk command was run.
 	Files map[string]*UpdatedFile
-	// Tasks ids that could be wait for the completion.
-	// We use the wording "could be" because we cannot be
-	// certain that the file which triggered the event actually
-	// matches the tasks glob pattern.
+	// Task ids affected by the files in this event.
 	Tasks map[string]bool
 }
 
@@ -247,7 +244,7 @@ func (w *Watcher) checkIfWeNeedToNotify(
 		return
 	}
 
-	tasks := directories.TaskIds
+	tasks := w.matchingTasksForFile(eventFilePath, directories.TaskIds)
 
 	if len(tasks) > 0 {
 		w.aggregator.aggregatorLock.Lock()
@@ -267,13 +264,39 @@ func (w *Watcher) checkIfWeNeedToNotify(
 			event.Tasks[taskId] = true
 		}
 		w.aggregator.aggregated[eventDirPath] = event
-		delay := w.fsDebounceForTasks(tasks)
+		delay := w.fsDebounceForTasks(w.pendingTasks())
 		w.aggregator.changeId++
 		changeId := w.aggregator.changeId
 		w.aggregator.aggregatorLock.Unlock()
 
 		go w.propagateEvents(delay, changeId)
 	}
+}
+
+func (w *Watcher) matchingTasksForFile(filePath string, directoryTasks map[string]bool) map[string]bool {
+	if len(w.directories.taskConfigs) == 0 {
+		return copyTaskIds(directoryTasks)
+	}
+
+	return getMatchingTasks(normalizePathForLookup(filePath), w.directories.taskConfigs)
+}
+
+func copyTaskIds(source map[string]bool) map[string]bool {
+	target := make(map[string]bool, len(source))
+	for taskId, value := range source {
+		target[taskId] = value
+	}
+	return target
+}
+
+func (w *Watcher) pendingTasks() map[string]bool {
+	tasks := make(map[string]bool)
+	for _, event := range w.aggregator.aggregated {
+		for taskId := range event.Tasks {
+			tasks[taskId] = true
+		}
+	}
+	return tasks
 }
 
 func (w *Watcher) findWatchableDirectory(dirPath string, changePath string) (string, string, WatchableDirectory, bool) {
