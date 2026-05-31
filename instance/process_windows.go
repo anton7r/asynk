@@ -2,11 +2,15 @@
 
 package instance
 
-import "golang.org/x/sys/windows"
+import (
+	"time"
+
+	"golang.org/x/sys/windows"
+)
 
 type OSProcessProbe struct{}
 
-func (OSProcessProbe) Alive(pid int) bool {
+func (OSProcessProbe) Matches(pid int, startTime time.Time) bool {
 	if pid <= 0 {
 		return false
 	}
@@ -22,5 +26,17 @@ func (OSProcessProbe) Alive(pid int) bool {
 		return false
 	}
 
-	return status == uint32(windows.WAIT_TIMEOUT)
+	if status != uint32(windows.WAIT_TIMEOUT) {
+		return false
+	}
+
+	var creation windows.Filetime
+	var exit windows.Filetime
+	var kernel windows.Filetime
+	var user windows.Filetime
+	if err := windows.GetProcessTimes(handle, &creation, &exit, &kernel, &user); err != nil {
+		return false
+	}
+
+	return sameStartTime(time.Unix(0, creation.Nanoseconds()), startTime)
 }

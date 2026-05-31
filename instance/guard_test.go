@@ -13,16 +13,17 @@ import (
 )
 
 type fakeProbe struct {
-	alive map[int]bool
+	matches map[int]bool
 }
 
-func (p fakeProbe) Alive(pid int) bool {
-	return p.alive[pid]
+func (p fakeProbe) Matches(pid int, startTime time.Time) bool {
+	return p.matches[pid]
 }
 
 func TestAcquireSucceedsWithNoOwner(t *testing.T) {
 	root := t.TempDir()
 	configDir := filepath.Join(root, "repo")
+	require.NoError(t, os.MkdirAll(configDir, 0755))
 
 	guard, err := Acquire(Options{
 		ConfigDir: configDir,
@@ -55,7 +56,7 @@ func TestAcquireBlockRejectsLiveOwner(t *testing.T) {
 		Policy:    PolicyBlock,
 		RootDir:   root,
 		PID:       202,
-		Probe:     fakeProbe{alive: map[int]bool{201: true}},
+		Probe:     fakeProbe{matches: map[int]bool{201: true}},
 	})
 
 	assert.Nil(t, guard)
@@ -81,7 +82,7 @@ func TestAcquireCleansStaleOwner(t *testing.T) {
 		RootDir:   root,
 		PID:       302,
 		Token:     "new-token",
-		Probe:     fakeProbe{alive: map[int]bool{301: false}},
+		Probe:     fakeProbe{matches: map[int]bool{301: false}},
 	})
 
 	require.NoError(t, err)
@@ -127,7 +128,7 @@ func TestAcquireReplaceRequestsShutdownAndWaitsForRelease(t *testing.T) {
 		RootDir:        root,
 		PID:            402,
 		Token:          "new-token",
-		Probe:          fakeProbe{alive: map[int]bool{401: true}},
+		Probe:          fakeProbe{matches: map[int]bool{401: true}},
 	})
 
 	require.NoError(t, err)
@@ -160,7 +161,7 @@ func TestAcquireReplaceTimesOutWithoutForceKill(t *testing.T) {
 		ReplaceTimeout: 20 * time.Millisecond,
 		RootDir:        root,
 		PID:            502,
-		Probe:          fakeProbe{alive: map[int]bool{501: true}},
+		Probe:          fakeProbe{matches: map[int]bool{501: true}},
 	})
 
 	assert.Nil(t, guard)
@@ -173,6 +174,136 @@ func TestAcquireReplaceTimesOutWithoutForceKill(t *testing.T) {
 	assert.Equal(t, 501, ownerAfter.PID)
 }
 
+func TestAcquireCanonicalizesSymlinkedConfigDirectory(t *testing.T) {
+	root := t.TempDir()
+	realConfigDir := filepath.Join(root, "real")
+	linkConfigDir := filepath.Join(root, "link")
+	require.NoError(t, os.Mkdir(realConfigDir, 0755))
+	if err := os.Symlink(realConfigDir, linkConfigDir); err != nil {
+		t.Skipf("symlink creation is not available: %v", err)
+	}
+
+	guard, err := Acquire(Options{
+		ConfigDir: realConfigDir,
+		Policy:    PolicyBlock,
+		RootDir:   filepath.Join(root, "locks"),
+		PID:       601,
+		Token:     "real-token",
+	})
+	require.NoError(t, err)
+	defer guard.Release()
+
+	second, err := Acquire(Options{
+		ConfigDir: linkConfigDir,
+		Policy:    PolicyBlock,
+		RootDir:   filepath.Join(root, "locks"),
+		PID:       602,
+		Probe:     fakeProbe{matches: map[int]bool{601: true}},
+	})
+
+	assert.Nil(t, second)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrAlreadyRunning))
+}
+
+func TestAcquireTreatsReusedPIDWithDifferentStartTimeAsStale(t *testing.T) {
+	root := t.TempDir()
+	configDir := filepath.Join(root, "repo")
+	lockDir := createOwner(t, root, configDir, Owner{
+		PID:       701,
+		StartTime: time.Now().Add(-time.Hour).UTC(),
+		Token:     "old-token",
+	})
+
+	guard, err := Acquire(Options{
+		ConfigDir: configDir,
+		Policy:    PolicyBlock,
+		RootDir:   root,
+		PID:       702,
+		Token:     "new-token",
+		Probe:     fakeProbe{matches: map[int]bool{701: false}},
+	})
+
+	require.NoError(t, err)
+	require.NotNil(t, guard)
+	assert.Equal(t, lockDir, guard.lockDir)
+
+	owner := readOwnerFile(t, guard.ownerPath)
+	assert.Equal(t, 702, owner.PID)
+	assert.Equal(t, "new-token", owner.Token)
+}
+
+func TestAcquireDoesNotRemoveFreshOwnerAfterStaleOwnerRace(t *testing.T) {
+	root := t.TempDir()
+	configDir := filepath.Join(root, "repo")
+	lockDir := createOwner(t, root, configDir, Owner{
+		PID:       801,
+		StartTime: time.Now().Add(-time.Hour).UTC(),
+		Token:     "stale-token",
+	})
+	ownerPath := filepath.Join(lockDir, ownerFileName)
+
+	replaced := false
+	guard, err := Acquire(Options{
+		ConfigDir: configDir,
+		Policy:    PolicyBlock,
+		RootDir:   root,
+		PID:       803,
+		Probe: fakeProbe{matches: map[int]bool{
+			801: false,
+			802: true,
+		}},
+		beforeStaleRemove: func() {
+			if replaced {
+				return
+			}
+			replaced = true
+			require.NoError(t, writeJSON(ownerPath, Owner{
+				PID:                 802,
+				StartTime:           time.Now().UTC(),
+				ConfigDir:           filepath.Clean(configDir),
+				Token:               "fresh-token",
+				ShutdownRequestPath: filepath.Join(lockDir, shutdownRequestFileName),
+			}))
+		},
+	})
+
+	assert.Nil(t, guard)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrAlreadyRunning))
+
+	owner := readOwnerFile(t, ownerPath)
+	assert.Equal(t, 802, owner.PID)
+	assert.Equal(t, "fresh-token", owner.Token)
+}
+
+func TestAcquireRecoversMalformedOwnerMetadata(t *testing.T) {
+	root := t.TempDir()
+	configDir := filepath.Join(root, "repo")
+	require.NoError(t, os.MkdirAll(configDir, 0755))
+	absConfigDir, err := filepath.Abs(configDir)
+	require.NoError(t, err)
+	lockDir, err := lockDir(root, filepath.Clean(absConfigDir))
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(lockDir, 0700))
+	require.NoError(t, os.WriteFile(filepath.Join(lockDir, ownerFileName), []byte("{broken"), 0600))
+
+	guard, err := Acquire(Options{
+		ConfigDir: configDir,
+		Policy:    PolicyBlock,
+		RootDir:   root,
+		PID:       901,
+		Token:     "new-token",
+	})
+
+	require.NoError(t, err)
+	require.NotNil(t, guard)
+
+	owner := readOwnerFile(t, guard.ownerPath)
+	assert.Equal(t, 901, owner.PID)
+	assert.Equal(t, "new-token", owner.Token)
+}
+
 func createOwner(t *testing.T, root, configDir string, owner Owner) string {
 	t.Helper()
 
@@ -180,6 +311,7 @@ func createOwner(t *testing.T, root, configDir string, owner Owner) string {
 	require.NoError(t, err)
 	configDir = filepath.Clean(configDir)
 	owner.ConfigDir = configDir
+	require.NoError(t, os.MkdirAll(configDir, 0755))
 
 	lockDir, err := lockDir(root, configDir)
 	require.NoError(t, err)
