@@ -113,8 +113,8 @@ func canonicalGoFastFingerprintHash(content []byte) (languageAwareFingerprint, b
 		switch {
 		case isGoASCIIWhitespace(c):
 			end, hasNewline := scanGoWhitespaceEnd(content, i)
-			if hasNewline && previousTokenCanEndStatement && nextGoSignificantByte(content, end) == '{' {
-				writeGoFastCanonicalTokenToHash(&writer, ';', []byte("\n{"))
+			if hasNewline && previousTokenCanEndStatement && nextGoSignificantByte(content, end) != '}' {
+				writeGoFastCanonicalTokenToHash(&writer, ';', []byte("\n"))
 			}
 			i = end
 		case c == '/' && i+1 < len(content) && content[i+1] == '/':
@@ -174,8 +174,8 @@ func canonicalGoFastFingerprintHash(content []byte) (languageAwareFingerprint, b
 			}
 			if unicode.IsSpace(r) {
 				end, hasNewline := scanGoUnicodeWhitespaceEnd(content, i)
-				if hasNewline && previousTokenCanEndStatement && nextGoSignificantByte(content, end) == '{' {
-					writeGoFastCanonicalTokenToHash(&writer, ';', []byte("\n{"))
+				if hasNewline && previousTokenCanEndStatement && nextGoSignificantByte(content, end) != '}' {
+					writeGoFastCanonicalTokenToHash(&writer, ';', []byte("\n"))
 				}
 				i = end
 				continue
@@ -438,8 +438,8 @@ func canonicalizeGo(content []byte) ([]byte, bool) {
 			break
 		}
 		if tok == token.SEMICOLON && lit == "\n" {
-			if nextGoSignificantByte(content, fileSet.Position(pos).Offset) == '{' {
-				buffer = appendCanonicalToken(buffer, "semicolon", "\n{")
+			if nextGoSignificantByte(content, fileSet.Position(pos).Offset) != '}' {
+				buffer = appendCanonicalToken(buffer, "semicolon", "\n")
 			}
 			continue
 		}

@@ -219,11 +219,13 @@ func (w *Watcher) handleFsEvent(event fsnotify.Event) {
 
 	stat, err := w.fs.Lstat(changePath)
 	if err != nil {
-		// If the file no longer exists, it was a transient file (e.g.,
-		// temporary files created and quickly deleted by build tools like
-		// the Go compiler). Treat this the same as a Remove event — skip
-		// it silently rather than logging an error.
+		// If the file no longer exists, it was either transient or moved away.
+		// Suppression-enabled tasks still need deleted inputs propagated so
+		// their fingerprints can be recomputed without the removed file.
 		if errors.Is(err, os.ErrNotExist) {
+			if w.aggregateRemoveForSuppressedTasks(changePath) {
+				return
+			}
 			w.log.Debug("File no longer exists, skipping transient file event",
 				zap.String("filePath", changePath),
 			)

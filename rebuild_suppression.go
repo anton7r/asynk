@@ -28,9 +28,11 @@ type FileFingerprint struct {
 }
 
 type rebuildSuppressionTaskState struct {
-	LastAccepted *TaskFingerprint
-	LastPending  *TaskFingerprint
-	LastStarted  *TaskFingerprint
+	LastAccepted               *TaskFingerprint
+	LastPending                *TaskFingerprint
+	LastStarted                *TaskFingerprint
+	LastAcceptedBeforeStart    *TaskFingerprint
+	LastAcceptedBeforeStartSet bool
 }
 
 type rebuildSuppressionState struct {
@@ -200,6 +202,8 @@ func (runner *Runner) recordSuccessfulRebuildSuppressionTaskResult(taskId string
 	if state.LastStarted != nil {
 		state.LastAccepted = state.LastStarted
 		state.LastStarted = nil
+		state.LastAcceptedBeforeStart = nil
+		state.LastAcceptedBeforeStartSet = false
 	}
 }
 
@@ -213,7 +217,12 @@ func (runner *Runner) recordFailedRebuildSuppressionTaskResult(taskId string) {
 	defer runner.rebuildSuppression.mu.Unlock()
 
 	state := runner.rebuildSuppressionTaskStateLocked(taskId)
+	if state.LastStarted != nil && state.LastAcceptedBeforeStartSet {
+		state.LastAccepted = state.LastAcceptedBeforeStart
+	}
 	state.LastStarted = nil
+	state.LastAcceptedBeforeStart = nil
+	state.LastAcceptedBeforeStartSet = false
 }
 
 func (runner *Runner) recordStartedRebuildSuppressionTask(taskId string) {
@@ -235,8 +244,9 @@ func (runner *Runner) recordStartedRebuildSuppressionTask(taskId string) {
 
 	taskConfig := runner.Config.Tasks[taskId]
 	if taskConfig != nil && taskConfig.Type == config.TaskType_Continuous {
+		state.LastAcceptedBeforeStart = state.LastAccepted
+		state.LastAcceptedBeforeStartSet = true
 		state.LastAccepted = state.LastStarted
-		state.LastStarted = nil
 	}
 }
 

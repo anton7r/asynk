@@ -287,6 +287,30 @@ tasks:
 	assert.Contains(t, result, "build")
 }
 
+func TestRebuildSuppression_LanguageAwareGoPreservesInsertedSemicolonAfterReturn(t *testing.T) {
+	cfg := rebuildSuppressionConfig(t, `
+tasks:
+  build:
+    type: build
+    run: "echo build"
+    include:
+      - "**/*.go"
+    rebuild-suppression:
+      enabled: true
+      mode: language-aware-hash
+`)
+	fs := newRebuildSuppressionTestFS()
+	fs.addDir("./src")
+	fs.setFile("./src/main.go", "package main\nfunc value() int { return 1 }\n", time.Now())
+	runner := newRebuildSuppressionRunner(t, cfg, fs)
+	runner.initializeRebuildSuppression()
+
+	fs.setFile("./src/main.go", "package main\nfunc value() int { return\n1 }\n", time.Now().Add(time.Second))
+
+	result := runner.filterUnchangedRebuildInputs(schedulableBuildTask(cfg))
+	assert.Contains(t, result, "build")
+}
+
 func TestRebuildSuppression_LanguageAwareCacheUsesContentHash(t *testing.T) {
 	cfg := rebuildSuppressionConfig(t, `
 tasks:
@@ -779,6 +803,44 @@ tasks:
 		},
 	})
 	assert.Empty(t, second)
+}
+
+func TestRebuildSuppression_ContinuousFailedStartDoesNotAcceptFingerprint(t *testing.T) {
+	cfg := rebuildSuppressionConfig(t, `
+tasks:
+  provider:
+    type: continuous
+    run: "echo provider"
+    include:
+      - "**/*.go"
+    rebuild-suppression:
+      enabled: true
+`)
+	fs := newRebuildSuppressionTestFS()
+	fs.addDir("./src")
+	fs.setFile("./src/main.go", "package main\nvar value = 1\n", time.Now())
+	runner := newRebuildSuppressionRunner(t, cfg, fs)
+	runner.initializeRebuildSuppression()
+
+	fs.setFile("./src/main.go", "package main\nvar value = 2\n", time.Now().Add(time.Second))
+	first := runner.filterUnchangedRebuildInputs(map[string]*SchedulableTask{
+		"provider": {
+			TaskConfiguration: cfg.Tasks["provider"],
+			ModificationTime:  time.Now(),
+		},
+	})
+	assert.Contains(t, first, "provider")
+
+	runner.recordStartedRebuildSuppressionTask("provider")
+	runner.onTaskFinished("provider", true)
+
+	second := runner.filterUnchangedRebuildInputs(map[string]*SchedulableTask{
+		"provider": {
+			TaskConfiguration: cfg.Tasks["provider"],
+			ModificationTime:  time.Now(),
+		},
+	})
+	assert.Contains(t, second, "provider")
 }
 
 func TestRebuildSuppression_LanguageAwareLogsDuration(t *testing.T) {
