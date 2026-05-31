@@ -29,6 +29,7 @@ type FileFingerprint struct {
 
 type rebuildSuppressionTaskState struct {
 	LastAccepted *TaskFingerprint
+	LastPending  *TaskFingerprint
 }
 
 type rebuildSuppressionState struct {
@@ -181,8 +182,37 @@ func (runner *Runner) shouldScheduleAfterRebuildSuppression(
 		return false
 	}
 
-	state.LastAccepted = fingerprint
+	state.LastPending = fingerprint
 	return true
+}
+
+func (runner *Runner) recordSuccessfulRebuildSuppressionTaskResult(taskId string) {
+	effective := runner.Config.EffectiveRebuildSuppressionForTask(taskId)
+	if !effective.Enabled {
+		return
+	}
+
+	runner.rebuildSuppression.mu.Lock()
+	defer runner.rebuildSuppression.mu.Unlock()
+
+	state := runner.rebuildSuppressionTaskStateLocked(taskId)
+	if state.LastPending != nil {
+		state.LastAccepted = state.LastPending
+		state.LastPending = nil
+	}
+}
+
+func (runner *Runner) recordFailedRebuildSuppressionTaskResult(taskId string) {
+	effective := runner.Config.EffectiveRebuildSuppressionForTask(taskId)
+	if !effective.Enabled {
+		return
+	}
+
+	runner.rebuildSuppression.mu.Lock()
+	defer runner.rebuildSuppression.mu.Unlock()
+
+	state := runner.rebuildSuppressionTaskStateLocked(taskId)
+	state.LastPending = nil
 }
 
 func (runner *Runner) computeRebuildSuppressionFingerprint(

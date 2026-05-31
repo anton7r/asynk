@@ -106,15 +106,21 @@ func canonicalGoFingerprintHash(content []byte) (languageAwareFingerprint, bool)
 
 func canonicalGoFastFingerprintHash(content []byte) (languageAwareFingerprint, bool) {
 	writer := newCanonicalHashWriter()
+	previousTokenCanEndStatement := false
 
 	for i := 0; i < len(content); {
 		c := content[i]
 		switch {
 		case isGoASCIIWhitespace(c):
-			i++
+			end, hasNewline := scanGoWhitespaceEnd(content, i)
+			if hasNewline && previousTokenCanEndStatement && nextGoSignificantByte(content, end) == '{' {
+				writeGoFastCanonicalTokenToHash(&writer, ';', []byte("\n{"))
+			}
+			i = end
 		case c == '/' && i+1 < len(content) && content[i+1] == '/':
 			end := scanGoLineCommentEnd(content, i+2)
 			writeGoFastCanonicalTokenToHash(&writer, 'c', content[i:end])
+			previousTokenCanEndStatement = false
 			i = end
 		case c == '/' && i+1 < len(content) && content[i+1] == '*':
 			end, ok := scanGoBlockCommentEnd(content, i+2)
@@ -122,6 +128,7 @@ func canonicalGoFastFingerprintHash(content []byte) (languageAwareFingerprint, b
 				return languageAwareFingerprint{}, false
 			}
 			writeGoFastCanonicalTokenToHash(&writer, 'c', content[i:end])
+			previousTokenCanEndStatement = false
 			i = end
 		case c == '"' || c == '\'':
 			end, ok := scanGoQuotedLiteral(content, i, c)
@@ -129,6 +136,7 @@ func canonicalGoFastFingerprintHash(content []byte) (languageAwareFingerprint, b
 				return languageAwareFingerprint{}, false
 			}
 			writeGoFastCanonicalTokenToHash(&writer, 's', content[i:end])
+			previousTokenCanEndStatement = true
 			i = end
 		case c == '`':
 			end, ok := scanGoRawString(content, i)
@@ -136,10 +144,12 @@ func canonicalGoFastFingerprintHash(content []byte) (languageAwareFingerprint, b
 				return languageAwareFingerprint{}, false
 			}
 			writeGoFastCanonicalTokenToHash(&writer, 's', content[i:end])
+			previousTokenCanEndStatement = true
 			i = end
 		case isGoASCIIIdentifierStart(c):
 			end := scanGoIdentifier(content, i)
 			writeGoFastCanonicalTokenToHash(&writer, 'i', content[i:end])
+			previousTokenCanEndStatement = goTokenCanEndStatement(content[i:end])
 			i = end
 		case isGoASCIIDigit(c) || (c == '.' && i+1 < len(content) && isGoASCIIDigit(content[i+1])):
 			end, ok := scanGoSimpleNumber(content, i)
@@ -147,6 +157,7 @@ func canonicalGoFastFingerprintHash(content []byte) (languageAwareFingerprint, b
 				return languageAwareFingerprint{}, false
 			}
 			writeGoFastCanonicalTokenToHash(&writer, 'n', content[i:end])
+			previousTokenCanEndStatement = true
 			i = end
 		case c < utf8.RuneSelf:
 			end := scanGoOperator(content, i)
@@ -154,6 +165,7 @@ func canonicalGoFastFingerprintHash(content []byte) (languageAwareFingerprint, b
 				return languageAwareFingerprint{}, false
 			}
 			writeGoFastCanonicalTokenToHash(&writer, 'o', content[i:end])
+			previousTokenCanEndStatement = goTokenCanEndStatement(content[i:end])
 			i = end
 		default:
 			r, size := utf8.DecodeRune(content[i:])
@@ -161,12 +173,17 @@ func canonicalGoFastFingerprintHash(content []byte) (languageAwareFingerprint, b
 				return languageAwareFingerprint{}, false
 			}
 			if unicode.IsSpace(r) {
-				i += size
+				end, hasNewline := scanGoUnicodeWhitespaceEnd(content, i)
+				if hasNewline && previousTokenCanEndStatement && nextGoSignificantByte(content, end) == '{' {
+					writeGoFastCanonicalTokenToHash(&writer, ';', []byte("\n{"))
+				}
+				i = end
 				continue
 			}
 			if isGoIdentifierStart(r) {
 				end := scanGoIdentifier(content, i)
 				writeGoFastCanonicalTokenToHash(&writer, 'i', content[i:end])
+				previousTokenCanEndStatement = goTokenCanEndStatement(content[i:end])
 				i = end
 				continue
 			}
@@ -200,6 +217,70 @@ func scanGoLineCommentEnd(content []byte, start int) int {
 		}
 	}
 	return len(content)
+}
+
+func scanGoWhitespaceEnd(content []byte, start int) (int, bool) {
+	hasNewline := false
+	i := start
+	for i < len(content) && isGoASCIIWhitespace(content[i]) {
+		if content[i] == '\n' || content[i] == '\r' {
+			hasNewline = true
+		}
+		i++
+	}
+	return i, hasNewline
+}
+
+func scanGoUnicodeWhitespaceEnd(content []byte, start int) (int, bool) {
+	hasNewline := false
+	i := start
+	for i < len(content) {
+		c := content[i]
+		if c < utf8.RuneSelf {
+			if !isGoASCIIWhitespace(c) {
+				break
+			}
+			if c == '\n' || c == '\r' {
+				hasNewline = true
+			}
+			i++
+			continue
+		}
+
+		r, size := utf8.DecodeRune(content[i:])
+		if r == utf8.RuneError && size == 1 {
+			break
+		}
+		if !unicode.IsSpace(r) {
+			break
+		}
+		i += size
+	}
+	return i, hasNewline
+}
+
+func nextGoSignificantByte(content []byte, start int) byte {
+	for i := start; i < len(content); {
+		c := content[i]
+		if c < utf8.RuneSelf {
+			if isGoASCIIWhitespace(c) {
+				i++
+				continue
+			}
+			return c
+		}
+
+		r, size := utf8.DecodeRune(content[i:])
+		if r == utf8.RuneError && size == 1 {
+			return 0
+		}
+		if unicode.IsSpace(r) {
+			i += size
+			continue
+		}
+		return 0
+	}
+	return 0
 }
 
 func scanGoBlockCommentEnd(content []byte, start int) (int, bool) {
@@ -326,6 +407,21 @@ func isGoIdentifierPart(r rune) bool {
 	return isGoIdentifierStart(r) || unicode.IsDigit(r)
 }
 
+func goTokenCanEndStatement(token []byte) bool {
+	switch string(token) {
+	case "break", "continue", "fallthrough", "return", "++", "--", ")", "]", "}":
+		return true
+	case "package", "import", "func", "var", "const", "type", "struct", "interface", "map", "chan", "go", "defer", "if", "else", "for", "range", "switch", "select", "case", "default", "goto":
+		return false
+	}
+
+	if len(token) == 0 {
+		return false
+	}
+	c := token[0]
+	return c == '_' || isGoASCIILetter(c) || isGoASCIIDigit(c) || c == '"' || c == '\'' || c == '`'
+}
+
 func canonicalizeGo(content []byte) ([]byte, bool) {
 	fileSet := token.NewFileSet()
 	file := fileSet.AddFile("", fileSet.Base(), len(content))
@@ -337,11 +433,14 @@ func canonicalizeGo(content []byte) ([]byte, bool) {
 
 	buffer := make([]byte, 0, len(content))
 	for {
-		_, tok, lit := goScanner.Scan()
+		pos, tok, lit := goScanner.Scan()
 		if tok == token.EOF {
 			break
 		}
 		if tok == token.SEMICOLON && lit == "\n" {
+			if nextGoSignificantByte(content, fileSet.Position(pos).Offset) == '{' {
+				buffer = appendCanonicalToken(buffer, "semicolon", "\n{")
+			}
 			continue
 		}
 		if lit == "" {
@@ -368,7 +467,11 @@ func canonicalizeJavaScriptLike(content []byte) ([]byte, bool) {
 	for i := 0; i < len(source); {
 		r, size := utf8.DecodeRuneInString(source[i:])
 		if isJSWhitespace(r) {
-			i += size
+			end, hasLineTerminator := scanJSWhitespaceEnd(source, i)
+			if hasLineTerminator && jsRestrictedKeywordRequiresLineTerminator(previousToken) && nextJSSignificantRune(source, end) != 0 {
+				writeCanonicalToken(&builder, "line-terminator", "\n")
+			}
+			i = end
 			continue
 		}
 
@@ -579,6 +682,33 @@ func scanLineCommentEnd(source string, start int) int {
 	return len(source)
 }
 
+func scanJSWhitespaceEnd(source string, start int) (int, bool) {
+	hasLineTerminator := false
+	i := start
+	for i < len(source) {
+		r, size := utf8.DecodeRuneInString(source[i:])
+		if !isJSWhitespace(r) {
+			break
+		}
+		if isJSLineTerminator(r) {
+			hasLineTerminator = true
+		}
+		i += size
+	}
+	return i, hasLineTerminator
+}
+
+func nextJSSignificantRune(source string, start int) rune {
+	for i := start; i < len(source); {
+		r, size := utf8.DecodeRuneInString(source[i:])
+		if !isJSWhitespace(r) {
+			return r
+		}
+		i += size
+	}
+	return 0
+}
+
 func scanJSString(source string, start int, quote rune) (int, bool) {
 	escaped := false
 	for i := start + 1; i < len(source); {
@@ -787,6 +917,15 @@ func jsPreviousTokenCanEndExpression(token string) bool {
 
 	r, _ := utf8.DecodeLastRuneInString(token)
 	return isJSIdentifierPart(r) || unicode.IsDigit(r) || r == '\'' || r == '"' || r == '`'
+}
+
+func jsRestrictedKeywordRequiresLineTerminator(token string) bool {
+	switch token {
+	case "return", "throw", "yield", "break", "continue":
+		return true
+	default:
+		return false
+	}
 }
 
 func hasDigitAfterRune(source string, index int) bool {

@@ -183,6 +183,34 @@ tasks:
 	assert.Empty(t, result)
 }
 
+func TestRebuildSuppression_FailedChangedInputRetriesUnchangedFingerprint(t *testing.T) {
+	cfg := rebuildSuppressionConfig(t, `
+tasks:
+  build:
+    type: build
+    run: "echo build"
+    include:
+      - "**/*.go"
+    rebuild-suppression:
+      enabled: true
+`)
+	fs := newRebuildSuppressionTestFS()
+	fs.addDir("./src")
+	fs.setFile("./src/main.go", "package main\nvar value = 1\n", time.Now())
+	runner := newRebuildSuppressionRunner(t, cfg, fs)
+	runner.initializeRebuildSuppression()
+
+	fs.setFile("./src/main.go", "package main\nvar value = 2\n", time.Now().Add(time.Second))
+
+	first := runner.filterUnchangedRebuildInputs(schedulableBuildTask(cfg))
+	assert.Contains(t, first, "build")
+
+	runner.onTaskFinished("build", true)
+
+	second := runner.filterUnchangedRebuildInputs(schedulableBuildTask(cfg))
+	assert.Contains(t, second, "build")
+}
+
 func TestRebuildSuppression_LanguageAwareGoSkipsFormattingOnlyChange(t *testing.T) {
 	cfg := rebuildSuppressionConfig(t, `
 tasks:
@@ -205,6 +233,30 @@ tasks:
 
 	result := runner.filterUnchangedRebuildInputs(schedulableBuildTask(cfg))
 	assert.Empty(t, result)
+}
+
+func TestRebuildSuppression_LanguageAwareGoPreservesSemicolonSensitiveBraceNewline(t *testing.T) {
+	cfg := rebuildSuppressionConfig(t, `
+tasks:
+  build:
+    type: build
+    run: "echo build"
+    include:
+      - "**/*.go"
+    rebuild-suppression:
+      enabled: true
+      mode: language-aware-hash
+`)
+	fs := newRebuildSuppressionTestFS()
+	fs.addDir("./src")
+	fs.setFile("./src/main.go", "package main\nfunc f() bool { return false }\nfunc main() { switch f() { case true: println(\"tag\") } }\n", time.Now())
+	runner := newRebuildSuppressionRunner(t, cfg, fs)
+	runner.initializeRebuildSuppression()
+
+	fs.setFile("./src/main.go", "package main\nfunc f() bool { return false }\nfunc main() { switch f()\n{ case true: println(\"tag\") } }\n", time.Now().Add(time.Second))
+
+	result := runner.filterUnchangedRebuildInputs(schedulableBuildTask(cfg))
+	assert.Contains(t, result, "build")
 }
 
 func TestRebuildSuppression_LanguageAwareCacheUsesContentHash(t *testing.T) {
@@ -323,6 +375,30 @@ tasks:
 	runner.initializeRebuildSuppression()
 
 	fs.setFile("./src/main.js", "const fn = function() {}\n(function(){})()\n", time.Now().Add(time.Second))
+
+	result := runner.filterUnchangedRebuildInputs(schedulableBuildTask(cfg))
+	assert.Contains(t, result, "build")
+}
+
+func TestRebuildSuppression_LanguageAwareJSPreservesASILineTerminators(t *testing.T) {
+	cfg := rebuildSuppressionConfig(t, `
+tasks:
+  build:
+    type: build
+    run: "echo build"
+    include:
+      - "**/*.js"
+    rebuild-suppression:
+      enabled: true
+      mode: language-aware-hash
+`)
+	fs := newRebuildSuppressionTestFS()
+	fs.addDir("./src")
+	fs.setFile("./src/main.js", "function f() { return value }\n", time.Now())
+	runner := newRebuildSuppressionRunner(t, cfg, fs)
+	runner.initializeRebuildSuppression()
+
+	fs.setFile("./src/main.js", "function f() { return\nvalue }\n", time.Now().Add(time.Second))
 
 	result := runner.filterUnchangedRebuildInputs(schedulableBuildTask(cfg))
 	assert.Contains(t, result, "build")

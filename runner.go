@@ -332,8 +332,8 @@ func (runner *Runner) onFileChange(events map[string]watcher.AggregatedEvent) {
 	// Find tasks affected by file changes
 	// TODO: We could optimize this by passing range funcs
 	schedulableTasks := runner.findTasksAffectedByFileChanges(events)
-	schedulableTasks = runner.filterUnchangedRebuildInputs(schedulableTasks)
 	schedulableTasks = runner.filterRunningTasks(schedulableTasks)
+	schedulableTasks = runner.filterUnchangedRebuildInputs(schedulableTasks)
 
 	if len(schedulableTasks) == 0 {
 		runner.log.Info("No tasks to schedule based on file changes",
@@ -370,6 +370,7 @@ func (runner *Runner) onTaskFinished(taskIdentifier string, errored bool) {
 	runner.releaseFinishedTaskPorts(taskIdentifier, errored)
 
 	if errored {
+		runner.recordFailedRebuildSuppressionTaskResult(taskIdentifier)
 		runner.removeScheduledConsumersForFailedProvider(taskIdentifier)
 
 		// In single-run mode, check if all tasks are done
@@ -378,6 +379,8 @@ func (runner *Runner) onTaskFinished(taskIdentifier string, errored bool) {
 		}
 		return
 	}
+
+	runner.recordSuccessfulRebuildSuppressionTaskResult(taskIdentifier)
 
 	// Try to start tasks again if there are any scheduled tasks that can be started
 	runner.startScheduledTasks()
