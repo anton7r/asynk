@@ -14,12 +14,19 @@ import (
 
 type fakeProbe struct {
 	matches        map[int]bool
+	statuses       map[int]OwnerStatus
 	currentStarts  map[int]time.Time
 	currentStartOK bool
 }
 
-func (p fakeProbe) Matches(pid int, startTime time.Time) bool {
-	return p.matches[pid]
+func (p fakeProbe) Status(pid int, startTime time.Time) OwnerStatus {
+	if status, ok := p.statuses[pid]; ok {
+		return status
+	}
+	if p.matches[pid] {
+		return OwnerStatusMatch
+	}
+	return OwnerStatusDead
 }
 
 func (p fakeProbe) CurrentStartTime(pid int) (time.Time, bool) {
@@ -377,6 +384,71 @@ func TestAcquireWaitsForOwnerFileBeingCreated(t *testing.T) {
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, ErrAlreadyRunning))
 	assert.FileExists(t, ownerPath)
+}
+
+func TestAcquireBlockPreservesUnverifiedLiveOwner(t *testing.T) {
+	root := t.TempDir()
+	configDir := filepath.Join(root, "repo")
+	lockDir := createOwner(t, root, configDir, Owner{
+		PID:       1201,
+		StartTime: time.Now().Add(-time.Hour).UTC(),
+		Token:     "unverified-token",
+	})
+	ownerPath := filepath.Join(lockDir, ownerFileName)
+
+	guard, err := Acquire(Options{
+		ConfigDir: configDir,
+		Policy:    PolicyBlock,
+		RootDir:   root,
+		PID:       1202,
+		Probe: fakeProbe{
+			statuses: map[int]OwnerStatus{1201: OwnerStatusUnverified},
+		},
+	})
+
+	assert.Nil(t, guard)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrAlreadyRunning))
+	assert.DirExists(t, lockDir)
+
+	owner := readOwnerFile(t, ownerPath)
+	assert.Equal(t, 1201, owner.PID)
+	assert.Equal(t, "unverified-token", owner.Token)
+}
+
+func TestAcquireReplaceRetriesWhenOwnerExitsBeforeShutdownRequest(t *testing.T) {
+	root := t.TempDir()
+	configDir := filepath.Join(root, "repo")
+	lockDir := createOwner(t, root, configDir, Owner{
+		PID:       1301,
+		StartTime: time.Now().UTC(),
+		Token:     "exiting-token",
+	})
+
+	removed := false
+	guard, err := Acquire(Options{
+		ConfigDir:      configDir,
+		Policy:         PolicyReplace,
+		ReplaceTimeout: time.Second,
+		RootDir:        root,
+		PID:            1302,
+		Token:          "new-token",
+		Probe:          fakeProbe{matches: map[int]bool{1301: true}},
+		beforeRequestShutdown: func() {
+			if removed {
+				return
+			}
+			removed = true
+			require.NoError(t, os.RemoveAll(lockDir))
+		},
+	})
+
+	require.NoError(t, err)
+	require.NotNil(t, guard)
+
+	owner := readOwnerFile(t, guard.ownerPath)
+	assert.Equal(t, 1302, owner.PID)
+	assert.Equal(t, "new-token", owner.Token)
 }
 
 func createOwner(t *testing.T, root, configDir string, owner Owner) string {
