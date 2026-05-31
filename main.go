@@ -8,7 +8,9 @@ import (
 	"syscall"
 
 	"github.com/anton7r/asynk/config"
+	"github.com/anton7r/asynk/instance"
 	"github.com/anton7r/asynk/util"
+	"go.uber.org/zap"
 )
 
 // Version is set at build time via ldflags:
@@ -37,6 +39,18 @@ func main() {
 	}
 	log := createLogger(logLevel)
 
+	guard, err := acquireConfiguredInstanceGuard(configuration, *runOnce, instance.Acquire)
+	if err != nil {
+		fmt.Printf("Error acquiring instance guard: %v\n", err)
+		log.Error("Error acquiring instance guard", zap.Error(err))
+		return
+	}
+	defer func() {
+		if err := guard.Release(); err != nil {
+			log.Error("Error releasing instance guard", zap.Error(err))
+		}
+	}()
+
 	// Create a new application state
 	platform := util.NewPlatform()
 	runner := NewRunner(configuration, log, *runOnce, platform)
@@ -48,15 +62,38 @@ func main() {
 		log.Info("All tasks completed. Exiting.")
 	} else {
 		log.Info("Press Ctrl+C to stop Asynk.")
-		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-		defer stop()
+		signalCtx, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+		defer stopSignals()
+		ctx, cancel := context.WithCancel(signalCtx)
+		defer cancel()
+
+		guard.StartShutdownMonitor(ctx, cancel)
 
 		go runner.Start()
 
 		<-ctx.Done()
-		log.Info("Interrupt signal received . Stopping all running tasks...")
+		log.Info("Shutdown signal received. Stopping all running tasks...")
 		runner.Stop()
 
 		log.Info("github.com/anton7r/asynk exited gracefully. All running tasks stopped.")
 	}
+}
+
+func acquireConfiguredInstanceGuard(
+	configuration *config.Config,
+	runOnce bool,
+	acquire func(instance.Options) (*instance.Guard, error),
+) (*instance.Guard, error) {
+	if runOnce {
+		return nil, nil
+	}
+	if acquire == nil {
+		acquire = instance.Acquire
+	}
+
+	return acquire(instance.Options{
+		ConfigDir:      configuration.ConfigDir,
+		Policy:         instance.Policy(configuration.EffectiveInstancePolicy()),
+		ReplaceTimeout: configuration.EffectiveInstanceReplaceTimeout(),
+	})
 }

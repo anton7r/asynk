@@ -66,6 +66,11 @@ shared:
     rebuild-suppression:
       enabled: true
       mode: size-and-hash
+    # Optional: prevent or replace another long-running asynk instance that
+    # uses this same config directory. Defaults to policy: allow.
+    instance:
+      policy: block
+      replace-timeout: 5s
     # Excludes directories globally for all the configurations
     # For example if you want to ignore node_modules folder.
     # Supports glob patterns
@@ -128,6 +133,19 @@ tasks:
 ```
 
 `mode` can be `size-and-hash`, `size-and-mtime`, or `language-aware-hash`. Hash mode is more accurate and avoids timestamp-only rebuilds. `language-aware-hash` canonicalizes supported source files before hashing, currently Go, JS/TS script files, and SQL files, and falls back to raw hashing for unsupported extensions, JSX/TSX files, or source it cannot safely canonicalize. When this mode is used, asynk logs how long fingerprint construction took in milliseconds.
+
+### Instance guard
+
+`shared.instance` is opt-in and only applies to long-running watch mode. `asynk --once` can still run in parallel.
+
+```yaml
+shared:
+  instance:
+    policy: block # allow | block | replace
+    replace-timeout: 5s
+```
+
+`allow` keeps the default behavior. `block` exits if another live asynk process owns the same resolved config directory. `replace` asks the existing process to shut down gracefully and waits up to `replace-timeout`; if it does not exit in time, the new process exits without force-killing it.
 
 ### Task commands, working directories, and environment
 

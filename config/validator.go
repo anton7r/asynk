@@ -186,6 +186,21 @@ func (v *validator) validateRebuildSuppression() error {
 	return nil
 }
 
+func (v *validator) validateInstanceConfig() error {
+	switch v.config.Shared.Instance.Policy {
+	case "", InstancePolicy_Allow, InstancePolicy_Block, InstancePolicy_Replace:
+	default:
+		return fmt.Errorf("invalid shared instance policy: %s", v.config.Shared.Instance.Policy)
+	}
+
+	if v.config.Shared.Instance.ReplaceTimeout.IsSet() &&
+		v.config.Shared.Instance.ReplaceTimeout.Duration < 0 {
+		return fmt.Errorf("invalid shared instance replace-timeout configuration, duration cannot be negative")
+	}
+
+	return nil
+}
+
 func validateRebuildSuppressionConfig(scope string, suppression RebuildSuppressionConfig) error {
 	switch suppression.Mode {
 	case "", RebuildSuppressionMode_SizeAndHash, RebuildSuppressionMode_SizeAndMTime, RebuildSuppressionMode_LanguageAwareHash:
@@ -491,6 +506,7 @@ func validateConfig(config *Config) error {
 		validator.validateTaskId,
 		validator.validateFSDebounce,
 		validator.validateRebuildSuppression,
+		validator.validateInstanceConfig,
 		validator.validateWorkingDirectories,
 		validator.validateRunCommand,
 		validator.validateTaskTypes,

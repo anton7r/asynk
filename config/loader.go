@@ -61,6 +61,16 @@ const (
 	RebuildSuppressionMode_LanguageAwareHash RebuildSuppressionMode = "language-aware-hash"
 )
 
+type InstancePolicy string
+
+const (
+	InstancePolicy_Allow   InstancePolicy = "allow"
+	InstancePolicy_Block   InstancePolicy = "block"
+	InstancePolicy_Replace InstancePolicy = "replace"
+)
+
+const DefaultInstanceReplaceTimeout = 5 * time.Second
+
 type RebuildSuppressionConfig struct {
 	Enabled *bool                  `yaml:"enabled"`
 	Mode    RebuildSuppressionMode `yaml:"mode"`
@@ -148,6 +158,12 @@ type SharedConfig struct {
 	EnvFiles             util.StringArray         `yaml:"env-files"`
 	FSDebounce           util.Duration            `yaml:"fs-debounce"`
 	RebuildSuppression   RebuildSuppressionConfig `yaml:"rebuild-suppression"`
+	Instance             InstanceConfig           `yaml:"instance"`
+}
+
+type InstanceConfig struct {
+	Policy         InstancePolicy `yaml:"policy"`
+	ReplaceTimeout util.Duration  `yaml:"replace-timeout"`
 }
 
 // The tasks id comes from the keys in the YAML file.
@@ -286,4 +302,18 @@ func (config *Config) RebuildSuppressionTasks() map[string]bool {
 		}
 	}
 	return tasks
+}
+
+func (config *Config) EffectiveInstancePolicy() InstancePolicy {
+	if config.Shared.Instance.Policy == "" {
+		return InstancePolicy_Allow
+	}
+	return config.Shared.Instance.Policy
+}
+
+func (config *Config) EffectiveInstanceReplaceTimeout() time.Duration {
+	if config.Shared.Instance.ReplaceTimeout.IsSet() {
+		return config.Shared.Instance.ReplaceTimeout.Duration
+	}
+	return DefaultInstanceReplaceTimeout
 }

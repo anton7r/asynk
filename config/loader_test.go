@@ -75,6 +75,77 @@ tasks:
 	assert.Equal(t, "info", cfg.Shared.LogLevel)
 }
 
+func TestLoadFromBytes_InstanceConfigDefaults(t *testing.T) {
+	yml := []byte(`
+tasks:
+  app:
+    type: continuous
+    run: "echo hello"
+`)
+	cfg, err := LoadFromBytes(yml)
+
+	assert.NoError(t, err)
+	assert.Equal(t, InstancePolicy_Allow, cfg.EffectiveInstancePolicy())
+	assert.Equal(t, 5*time.Second, cfg.EffectiveInstanceReplaceTimeout())
+}
+
+func TestLoadFromBytes_InstanceConfigValidPolicies(t *testing.T) {
+	for _, policy := range []InstancePolicy{InstancePolicy_Allow, InstancePolicy_Block, InstancePolicy_Replace} {
+		t.Run(string(policy), func(t *testing.T) {
+			yml := []byte(`
+shared:
+  instance:
+    policy: ` + string(policy) + `
+    replace-timeout: 750ms
+tasks:
+  app:
+    type: continuous
+    run: "echo hello"
+`)
+			cfg, err := LoadFromBytes(yml)
+
+			assert.NoError(t, err)
+			assert.Equal(t, policy, cfg.EffectiveInstancePolicy())
+			assert.Equal(t, 750*time.Millisecond, cfg.EffectiveInstanceReplaceTimeout())
+		})
+	}
+}
+
+func TestLoadFromBytes_InstanceConfigRejectsInvalidPolicy(t *testing.T) {
+	yml := []byte(`
+shared:
+  instance:
+    policy: steal
+tasks:
+  app:
+    type: continuous
+    run: "echo hello"
+`)
+	cfg, err := LoadFromBytes(yml)
+
+	assert.Error(t, err)
+	assert.Nil(t, cfg)
+	assert.Contains(t, err.Error(), "invalid shared instance policy")
+}
+
+func TestLoadFromBytes_InstanceConfigRejectsNegativeReplaceTimeout(t *testing.T) {
+	yml := []byte(`
+shared:
+  instance:
+    policy: replace
+    replace-timeout: -1ms
+tasks:
+  app:
+    type: continuous
+    run: "echo hello"
+`)
+	cfg, err := LoadFromBytes(yml)
+
+	assert.Error(t, err)
+	assert.Nil(t, cfg)
+	assert.Contains(t, err.Error(), "replace-timeout")
+}
+
 func TestLoadFromBytes_FSDebounce(t *testing.T) {
 	yml := []byte(`
 shared:
