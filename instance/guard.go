@@ -133,11 +133,13 @@ func Acquire(options Options) (*Guard, error) {
 
 		owner, ownerData, err := readOwnerData(guard.ownerPath)
 		if err != nil {
-			if errors.Is(err, os.ErrNotExist) {
-				if _, _, waitErr := waitForOwnerData(guard.ownerPath, ownerCreateTimeout); waitErr == nil {
+			if errors.Is(err, os.ErrNotExist) || isMalformedOwner(err) {
+				if _, waitOwnerData, waitErr := waitForOwnerData(guard.ownerPath, ownerCreateTimeout); waitErr == nil {
 					continue
 				} else if !errors.Is(waitErr, os.ErrNotExist) && !isMalformedOwner(waitErr) {
 					return nil, fmt.Errorf("reading instance owner: %w", waitErr)
+				} else {
+					ownerData = waitOwnerData
 				}
 			}
 			if errors.Is(err, os.ErrNotExist) || isMalformedOwner(err) {
@@ -261,7 +263,6 @@ func (g *Guard) shutdownRequested() bool {
 	if !info.ModTime().After(g.shutdownModTime) && !g.shutdownModTime.IsZero() {
 		return false
 	}
-	g.shutdownModTime = info.ModTime()
 
 	data, err := os.ReadFile(g.shutdownPath)
 	if err != nil {
@@ -273,7 +274,12 @@ func (g *Guard) shutdownRequested() bool {
 		return false
 	}
 
-	return request.Token == g.token
+	if request.Token != g.token {
+		return false
+	}
+
+	g.shutdownModTime = info.ModTime()
+	return true
 }
 
 func (g *Guard) tryCreate(now func() time.Time, probe ProcessProbe) (bool, error) {
@@ -346,7 +352,7 @@ func waitForOwnerData(path string, timeout time.Duration) (Owner, []byte, error)
 	deadline := time.Now().Add(timeout)
 	for {
 		owner, data, err := readOwnerData(path)
-		if err == nil || !errors.Is(err, os.ErrNotExist) {
+		if err == nil || (!errors.Is(err, os.ErrNotExist) && !isMalformedOwner(err)) {
 			return owner, data, err
 		}
 		if time.Now().After(deadline) {

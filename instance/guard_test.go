@@ -386,6 +386,46 @@ func TestAcquireWaitsForOwnerFileBeingCreated(t *testing.T) {
 	assert.FileExists(t, ownerPath)
 }
 
+func TestAcquireWaitsForMalformedOwnerFileBeingCreated(t *testing.T) {
+	root := t.TempDir()
+	configDir := filepath.Join(root, "repo")
+	require.NoError(t, os.MkdirAll(configDir, 0755))
+	absConfigDir, err := filepath.Abs(configDir)
+	require.NoError(t, err)
+	lockDir, err := lockDir(root, filepath.Clean(absConfigDir))
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(lockDir, 0700))
+
+	ownerPath := filepath.Join(lockDir, ownerFileName)
+	require.NoError(t, os.WriteFile(ownerPath, []byte("{"), 0600))
+	owner := Owner{
+		PID:                 1201,
+		StartTime:           time.Now().UTC(),
+		ConfigDir:           filepath.Clean(absConfigDir),
+		Token:               "creating-token",
+		ShutdownRequestPath: filepath.Join(lockDir, shutdownRequestFileName),
+	}
+	ownerWritten := make(chan error, 1)
+	go func() {
+		time.Sleep(25 * time.Millisecond)
+		ownerWritten <- writeJSON(ownerPath, owner)
+	}()
+
+	guard, err := Acquire(Options{
+		ConfigDir: configDir,
+		Policy:    PolicyBlock,
+		RootDir:   root,
+		PID:       1202,
+		Probe:     fakeProbe{matches: map[int]bool{1201: true}},
+	})
+
+	require.NoError(t, <-ownerWritten)
+	assert.Nil(t, guard)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrAlreadyRunning))
+	assert.FileExists(t, ownerPath)
+}
+
 func TestAcquireBlockPreservesUnverifiedLiveOwner(t *testing.T) {
 	root := t.TempDir()
 	configDir := filepath.Join(root, "repo")
@@ -449,6 +489,29 @@ func TestAcquireReplaceRetriesWhenOwnerExitsBeforeShutdownRequest(t *testing.T) 
 	owner := readOwnerFile(t, guard.ownerPath)
 	assert.Equal(t, 1302, owner.PID)
 	assert.Equal(t, "new-token", owner.Token)
+}
+
+func TestShutdownRequestedRetriesMalformedRequestWithSameModTime(t *testing.T) {
+	root := t.TempDir()
+	shutdownPath := filepath.Join(root, shutdownRequestFileName)
+	guard := &Guard{
+		shutdownPath: shutdownPath,
+		token:        "owner-token",
+	}
+	modTime := time.Date(2026, 5, 31, 16, 0, 0, 0, time.UTC)
+
+	require.NoError(t, os.WriteFile(shutdownPath, []byte("{"), 0600))
+	require.NoError(t, os.Chtimes(shutdownPath, modTime, modTime))
+	assert.False(t, guard.shutdownRequested())
+
+	require.NoError(t, writeJSON(shutdownPath, shutdownRequest{
+		Token:       "owner-token",
+		RequestedBy: 1401,
+		RequestedAt: modTime,
+	}))
+	require.NoError(t, os.Chtimes(shutdownPath, modTime, modTime))
+
+	assert.True(t, guard.shutdownRequested())
 }
 
 func createOwner(t *testing.T, root, configDir string, owner Owner) string {
