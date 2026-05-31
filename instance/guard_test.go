@@ -13,11 +13,21 @@ import (
 )
 
 type fakeProbe struct {
-	matches map[int]bool
+	matches        map[int]bool
+	currentStarts  map[int]time.Time
+	currentStartOK bool
 }
 
 func (p fakeProbe) Matches(pid int, startTime time.Time) bool {
 	return p.matches[pid]
+}
+
+func (p fakeProbe) CurrentStartTime(pid int) (time.Time, bool) {
+	start, ok := p.currentStarts[pid]
+	if !ok {
+		return time.Time{}, p.currentStartOK
+	}
+	return start, true
 }
 
 func TestAcquireSucceedsWithNoOwner(t *testing.T) {
@@ -302,6 +312,71 @@ func TestAcquireRecoversMalformedOwnerMetadata(t *testing.T) {
 	owner := readOwnerFile(t, guard.ownerPath)
 	assert.Equal(t, 901, owner.PID)
 	assert.Equal(t, "new-token", owner.Token)
+}
+
+func TestAcquireRecordsCurrentProcessStartTime(t *testing.T) {
+	root := t.TempDir()
+	configDir := filepath.Join(root, "repo")
+	require.NoError(t, os.MkdirAll(configDir, 0755))
+	processStart := time.Date(2026, 5, 31, 12, 0, 0, 0, time.UTC)
+	acquireTime := processStart.Add(5 * time.Second)
+
+	guard, err := Acquire(Options{
+		ConfigDir: configDir,
+		Policy:    PolicyBlock,
+		RootDir:   root,
+		PID:       1001,
+		Token:     "owner-token",
+		Now:       func() time.Time { return acquireTime },
+		Probe: fakeProbe{
+			currentStarts: map[int]time.Time{1001: processStart},
+		},
+	})
+
+	require.NoError(t, err)
+	require.NotNil(t, guard)
+
+	owner := readOwnerFile(t, guard.ownerPath)
+	assert.Equal(t, processStart, owner.StartTime)
+}
+
+func TestAcquireWaitsForOwnerFileBeingCreated(t *testing.T) {
+	root := t.TempDir()
+	configDir := filepath.Join(root, "repo")
+	require.NoError(t, os.MkdirAll(configDir, 0755))
+	absConfigDir, err := filepath.Abs(configDir)
+	require.NoError(t, err)
+	lockDir, err := lockDir(root, filepath.Clean(absConfigDir))
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(lockDir, 0700))
+
+	ownerPath := filepath.Join(lockDir, ownerFileName)
+	owner := Owner{
+		PID:                 1101,
+		StartTime:           time.Now().UTC(),
+		ConfigDir:           filepath.Clean(absConfigDir),
+		Token:               "creating-token",
+		ShutdownRequestPath: filepath.Join(lockDir, shutdownRequestFileName),
+	}
+	ownerWritten := make(chan error, 1)
+	go func() {
+		time.Sleep(25 * time.Millisecond)
+		ownerWritten <- writeJSON(ownerPath, owner)
+	}()
+
+	guard, err := Acquire(Options{
+		ConfigDir: configDir,
+		Policy:    PolicyBlock,
+		RootDir:   root,
+		PID:       1102,
+		Probe:     fakeProbe{matches: map[int]bool{1101: true}},
+	})
+
+	require.NoError(t, <-ownerWritten)
+	assert.Nil(t, guard)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrAlreadyRunning))
+	assert.FileExists(t, ownerPath)
 }
 
 func createOwner(t *testing.T, root, configDir string, owner Owner) string {
