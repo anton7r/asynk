@@ -32,15 +32,34 @@ type rebuildSuppressionTaskState struct {
 }
 
 type rebuildSuppressionState struct {
-	mu    sync.Mutex
-	tasks map[string]*rebuildSuppressionTaskState
+	mu        sync.Mutex
+	tasks     map[string]*rebuildSuppressionTaskState
+	fileCache *rebuildSuppressionFileFingerprintCache
 }
 
 type rebuildSuppressionFingerprintStats struct {
 	TotalFiles         int
 	LanguageAwareFiles int
 	FallbackFiles      int
+	CacheHits          int
+	CacheMisses        int
 	Duration           time.Duration
+}
+
+type rebuildSuppressionFileFingerprintCache struct {
+	mu      sync.Mutex
+	entries map[rebuildSuppressionFileFingerprintCacheKey]rebuildSuppressionCachedFileFingerprint
+}
+
+type rebuildSuppressionFileFingerprintCacheKey struct {
+	Path        string
+	Mode        config.RebuildSuppressionMode
+	ContentHash [sha256.Size]byte
+}
+
+type rebuildSuppressionCachedFileFingerprint struct {
+	Fingerprint FileFingerprint
+	Method      fileFingerprintMethod
 }
 
 type fileFingerprintMethod int
@@ -53,8 +72,41 @@ const (
 
 func newRebuildSuppressionState() *rebuildSuppressionState {
 	return &rebuildSuppressionState{
-		tasks: make(map[string]*rebuildSuppressionTaskState),
+		tasks:     make(map[string]*rebuildSuppressionTaskState),
+		fileCache: newRebuildSuppressionFileFingerprintCache(),
 	}
+}
+
+func newRebuildSuppressionFileFingerprintCache() *rebuildSuppressionFileFingerprintCache {
+	return &rebuildSuppressionFileFingerprintCache{
+		entries: make(map[rebuildSuppressionFileFingerprintCacheKey]rebuildSuppressionCachedFileFingerprint),
+	}
+}
+
+func (cache *rebuildSuppressionFileFingerprintCache) get(
+	key rebuildSuppressionFileFingerprintCacheKey,
+) (rebuildSuppressionCachedFileFingerprint, bool) {
+	if cache == nil {
+		return rebuildSuppressionCachedFileFingerprint{}, false
+	}
+
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	cached, ok := cache.entries[key]
+	return cached, ok
+}
+
+func (cache *rebuildSuppressionFileFingerprintCache) set(
+	key rebuildSuppressionFileFingerprintCacheKey,
+	value rebuildSuppressionCachedFileFingerprint,
+) {
+	if cache == nil {
+		return
+	}
+
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	cache.entries[key] = value
 }
 
 func (runner *Runner) initializeRebuildSuppression() {
@@ -143,6 +195,7 @@ func (runner *Runner) computeRebuildSuppressionFingerprint(
 		runner.Config.Shared.Exclude,
 		effective,
 		runner.deps.FS,
+		runner.rebuildSuppression.fileCache,
 	)
 
 	if effective.Mode == config.RebuildSuppressionMode_LanguageAwareHash {
@@ -151,6 +204,8 @@ func (runner *Runner) computeRebuildSuppressionFingerprint(
 			zap.Int("totalFiles", stats.TotalFiles),
 			zap.Int("languageAwareFiles", stats.LanguageAwareFiles),
 			zap.Int("fallbackFiles", stats.FallbackFiles),
+			zap.Int("cacheHits", stats.CacheHits),
+			zap.Int("cacheMisses", stats.CacheMisses),
 			zap.Int64("durationMs", stats.Duration.Milliseconds()),
 		)
 	}
@@ -172,6 +227,7 @@ func fingerprintTaskInputs(
 	globalExclude configutil.GlobArray,
 	effective config.EffectiveRebuildSuppressionConfig,
 	fs util.FileSystem,
+	cache *rebuildSuppressionFileFingerprintCache,
 ) (*TaskFingerprint, rebuildSuppressionFingerprintStats, error) {
 	if fs == nil {
 		fs = util.NewOSFileSystem()
@@ -201,9 +257,14 @@ func fingerprintTaskInputs(
 		}
 
 		stats.TotalFiles++
-		fileFingerprint, method, err := fingerprintFile(pathStr, info, effective, fs)
+		fileFingerprint, method, cacheHit, err := fingerprintFileWithCache(pathStr, info, effective, fs, cache)
 		if err != nil {
 			return err
+		}
+		if cacheHit {
+			stats.CacheHits++
+		} else if cache != nil && effective.Mode == config.RebuildSuppressionMode_LanguageAwareHash {
+			stats.CacheMisses++
 		}
 		if effective.Mode == config.RebuildSuppressionMode_LanguageAwareHash {
 			switch method {
@@ -223,6 +284,56 @@ func fingerprintTaskInputs(
 
 	stats.Duration = time.Since(start)
 	return fingerprint, stats, nil
+}
+
+func fingerprintFileWithCache(
+	pathStr string,
+	info os.FileInfo,
+	effective config.EffectiveRebuildSuppressionConfig,
+	fs util.FileSystem,
+	cache *rebuildSuppressionFileFingerprintCache,
+) (FileFingerprint, fileFingerprintMethod, bool, error) {
+	if effective.Mode != config.RebuildSuppressionMode_LanguageAwareHash || cache == nil {
+		fingerprint, method, err := fingerprintFile(pathStr, info, effective, fs)
+		return fingerprint, method, false, err
+	}
+
+	content, err := fs.ReadFile(pathStr)
+	if err != nil {
+		return FileFingerprint{}, fileFingerprintMethodRaw, false, fmt.Errorf("read %s: %w", pathStr, err)
+	}
+	rawSum := sha256.Sum256(content)
+	key := rebuildSuppressionFileFingerprintCacheKey{
+		Path:        normalizeFingerprintPath(pathStr),
+		Mode:        effective.Mode,
+		ContentHash: rawSum,
+	}
+
+	if cached, ok := cache.get(key); ok {
+		return cached.Fingerprint, cached.Method, true, nil
+	}
+
+	fileFingerprint := FileFingerprint{
+		Size:        info.Size(),
+		ModTimeNano: info.ModTime().UnixNano(),
+	}
+	method := fileFingerprintMethodRaw
+	if fingerprint, ok := languageAwareFingerprintHash(pathStr, content); ok {
+		fileFingerprint.Size = fingerprint.Size
+		fileFingerprint.ModTimeNano = 0
+		fileFingerprint.Hash = fingerprint.Hash
+		method = fileFingerprintMethodLanguageAware
+	} else {
+		fileFingerprint.Size = int64(len(content))
+		fileFingerprint.ModTimeNano = 0
+		fileFingerprint.Hash = hex.EncodeToString(rawSum[:])
+	}
+
+	cache.set(key, rebuildSuppressionCachedFileFingerprint{
+		Fingerprint: fileFingerprint,
+		Method:      method,
+	})
+	return fileFingerprint, method, false, nil
 }
 
 func fingerprintFile(

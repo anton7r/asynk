@@ -207,6 +207,31 @@ tasks:
 	assert.Empty(t, result)
 }
 
+func TestRebuildSuppression_LanguageAwareCacheUsesContentHash(t *testing.T) {
+	cfg := rebuildSuppressionConfig(t, `
+tasks:
+  build:
+    type: build
+    run: "echo build"
+    include:
+      - "**/*.go"
+    rebuild-suppression:
+      enabled: true
+      mode: language-aware-hash
+`)
+	modTime := time.Unix(1_700_000_000, 0)
+	fs := newRebuildSuppressionTestFS()
+	fs.addDir("./src")
+	fs.setFile("./src/main.go", "package main\nvar A = 1\n", modTime)
+	runner := newRebuildSuppressionRunner(t, cfg, fs)
+	runner.initializeRebuildSuppression()
+
+	fs.setFile("./src/main.go", "package main\nvar A = 2\n", modTime)
+
+	result := runner.filterUnchangedRebuildInputs(schedulableBuildTask(cfg))
+	assert.Contains(t, result, "build")
+}
+
 func TestRebuildSuppression_LanguageAwareInvalidGoFallsBackToRaw(t *testing.T) {
 	cfg := rebuildSuppressionConfig(t, `
 tasks:
