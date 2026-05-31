@@ -22,7 +22,7 @@ func languageAwareFingerprintContent(pathStr string, content []byte) ([]byte, bo
 	switch strings.ToLower(filepath.Ext(pathStr)) {
 	case ".go":
 		return canonicalizeGo(content)
-	case ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts":
+	case ".js", ".mjs", ".cjs", ".ts", ".mts", ".cts":
 		return canonicalizeJavaScriptLike(content)
 	case ".sql":
 		return canonicalizeSQL(content)
@@ -552,11 +552,16 @@ func canonicalizeSQL(content []byte) ([]byte, bool) {
 
 	source := string(content)
 	var builder strings.Builder
+	previousTokenKind := ""
 
 	for i := 0; i < len(source); {
 		r, size := utf8.DecodeRuneInString(source[i:])
 		if unicode.IsSpace(r) {
-			i += size
+			end, hasLineTerminator := scanSQLWhitespaceEnd(source, i)
+			if hasLineTerminator && previousTokenKind == "string" && nextSQLSignificantRune(source, end) == '\'' {
+				writeCanonicalToken(&builder, "line-terminator", "\n")
+			}
+			i = end
 			continue
 		}
 
@@ -564,6 +569,7 @@ func canonicalizeSQL(content []byte) ([]byte, bool) {
 		case strings.HasPrefix(source[i:], "--"):
 			end := scanSQLLineCommentEnd(source, i+2)
 			writeCanonicalToken(&builder, "comment", source[i:end])
+			previousTokenKind = "comment"
 			i = end
 		case strings.HasPrefix(source[i:], "/*"):
 			end := strings.Index(source[i+2:], "*/")
@@ -572,6 +578,7 @@ func canonicalizeSQL(content []byte) ([]byte, bool) {
 			}
 			end = i + 2 + end + 2
 			writeCanonicalToken(&builder, "comment", source[i:end])
+			previousTokenKind = "comment"
 			i = end
 		case r == '\'':
 			end, ok := scanSQLSingleQuotedString(source, i)
@@ -579,6 +586,7 @@ func canonicalizeSQL(content []byte) ([]byte, bool) {
 				return nil, false
 			}
 			writeCanonicalToken(&builder, "string", source[i:end])
+			previousTokenKind = "string"
 			i = end
 		case r == '"':
 			end, ok := scanSQLDelimitedIdentifier(source, i, '"')
@@ -586,6 +594,7 @@ func canonicalizeSQL(content []byte) ([]byte, bool) {
 				return nil, false
 			}
 			writeCanonicalToken(&builder, "ident", source[i:end])
+			previousTokenKind = "ident"
 			i = end
 		case r == '`':
 			end, ok := scanSQLDelimitedIdentifier(source, i, '`')
@@ -593,6 +602,7 @@ func canonicalizeSQL(content []byte) ([]byte, bool) {
 				return nil, false
 			}
 			writeCanonicalToken(&builder, "ident", source[i:end])
+			previousTokenKind = "ident"
 			i = end
 		case r == '[':
 			end, ok := scanSQLBracketIdentifier(source, i)
@@ -600,6 +610,7 @@ func canonicalizeSQL(content []byte) ([]byte, bool) {
 				return nil, false
 			}
 			writeCanonicalToken(&builder, "ident", source[i:end])
+			previousTokenKind = "ident"
 			i = end
 		case r == '$':
 			end, ok, matched := scanSQLDollarQuotedString(source, i)
@@ -608,31 +619,38 @@ func canonicalizeSQL(content []byte) ([]byte, bool) {
 					return nil, false
 				}
 				writeCanonicalToken(&builder, "string", source[i:end])
+				previousTokenKind = "string"
 				i = end
 				continue
 			}
 			if end := scanSQLDollarParameter(source, i); end > i {
 				writeCanonicalToken(&builder, "param", source[i:end])
+				previousTokenKind = "param"
 				i = end
 				continue
 			}
 			writeCanonicalToken(&builder, "op", source[i:i+size])
+			previousTokenKind = "op"
 			i += size
 		case isSQLIdentifierStart(r):
 			end := scanSQLIdentifier(source, i)
 			writeCanonicalToken(&builder, "ident", source[i:end])
+			previousTokenKind = "ident"
 			i = end
 		case unicode.IsDigit(r) || (r == '.' && hasDigitAfterRune(source, i+size)):
 			end := scanSQLNumber(source, i)
 			writeCanonicalToken(&builder, "number", source[i:end])
+			previousTokenKind = "number"
 			i = end
 		case isSQLOperatorRune(r):
 			end := scanSQLOperator(source, i)
 			writeCanonicalToken(&builder, "op", source[i:end])
+			previousTokenKind = "op"
 			i = end
 		default:
 			end := i + size
 			writeCanonicalToken(&builder, "rune", source[i:end])
+			previousTokenKind = "rune"
 			i = end
 		}
 	}
@@ -959,6 +977,33 @@ func isJSOperatorRune(r rune) bool {
 	default:
 		return false
 	}
+}
+
+func scanSQLWhitespaceEnd(source string, start int) (int, bool) {
+	hasLineTerminator := false
+	i := start
+	for i < len(source) {
+		r, size := utf8.DecodeRuneInString(source[i:])
+		if !unicode.IsSpace(r) {
+			break
+		}
+		if isJSLineTerminator(r) {
+			hasLineTerminator = true
+		}
+		i += size
+	}
+	return i, hasLineTerminator
+}
+
+func nextSQLSignificantRune(source string, start int) rune {
+	for i := start; i < len(source); {
+		r, size := utf8.DecodeRuneInString(source[i:])
+		if !unicode.IsSpace(r) {
+			return r
+		}
+		i += size
+	}
+	return 0
 }
 
 func scanSQLLineCommentEnd(source string, start int) int {

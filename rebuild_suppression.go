@@ -30,6 +30,7 @@ type FileFingerprint struct {
 type rebuildSuppressionTaskState struct {
 	LastAccepted *TaskFingerprint
 	LastPending  *TaskFingerprint
+	LastStarted  *TaskFingerprint
 }
 
 type rebuildSuppressionState struct {
@@ -196,9 +197,9 @@ func (runner *Runner) recordSuccessfulRebuildSuppressionTaskResult(taskId string
 	defer runner.rebuildSuppression.mu.Unlock()
 
 	state := runner.rebuildSuppressionTaskStateLocked(taskId)
-	if state.LastPending != nil {
-		state.LastAccepted = state.LastPending
-		state.LastPending = nil
+	if state.LastStarted != nil {
+		state.LastAccepted = state.LastStarted
+		state.LastStarted = nil
 	}
 }
 
@@ -212,7 +213,31 @@ func (runner *Runner) recordFailedRebuildSuppressionTaskResult(taskId string) {
 	defer runner.rebuildSuppression.mu.Unlock()
 
 	state := runner.rebuildSuppressionTaskStateLocked(taskId)
+	state.LastStarted = nil
+}
+
+func (runner *Runner) recordStartedRebuildSuppressionTask(taskId string) {
+	effective := runner.Config.EffectiveRebuildSuppressionForTask(taskId)
+	if !effective.Enabled {
+		return
+	}
+
+	runner.rebuildSuppression.mu.Lock()
+	defer runner.rebuildSuppression.mu.Unlock()
+
+	state := runner.rebuildSuppressionTaskStateLocked(taskId)
+	if state.LastPending == nil {
+		return
+	}
+
+	state.LastStarted = state.LastPending
 	state.LastPending = nil
+
+	taskConfig := runner.Config.Tasks[taskId]
+	if taskConfig != nil && taskConfig.Type == config.TaskType_Continuous {
+		state.LastAccepted = state.LastStarted
+		state.LastStarted = nil
+	}
 }
 
 func (runner *Runner) computeRebuildSuppressionFingerprint(

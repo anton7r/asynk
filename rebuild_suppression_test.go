@@ -211,6 +211,34 @@ tasks:
 	assert.Contains(t, second, "build")
 }
 
+func TestRebuildSuppression_RunningBuildDoesNotAcceptQueuedFingerprint(t *testing.T) {
+	cfg := rebuildSuppressionConfig(t, `
+tasks:
+  build:
+    type: build
+    run: "echo build"
+    include:
+      - "**/*.go"
+    rebuild-suppression:
+      enabled: true
+`)
+	fs := newRebuildSuppressionTestFS()
+	fs.addDir("./src")
+	fs.setFile("./src/main.go", "package main\nvar value = 1\n", time.Now())
+	runner := newRebuildSuppressionRunner(t, cfg, fs)
+	runner.initializeRebuildSuppression()
+
+	fs.setFile("./src/main.go", "package main\nvar value = 2\n", time.Now().Add(time.Second))
+
+	first := runner.filterUnchangedRebuildInputs(schedulableBuildTask(cfg))
+	assert.Contains(t, first, "build")
+
+	runner.onTaskFinished("build", false)
+
+	second := runner.filterUnchangedRebuildInputs(schedulableBuildTask(cfg))
+	assert.Contains(t, second, "build")
+}
+
 func TestRebuildSuppression_LanguageAwareGoSkipsFormattingOnlyChange(t *testing.T) {
 	cfg := rebuildSuppressionConfig(t, `
 tasks:
@@ -404,6 +432,30 @@ tasks:
 	assert.Contains(t, result, "build")
 }
 
+func TestRebuildSuppression_LanguageAwareJSXPreservesTextWhitespace(t *testing.T) {
+	cfg := rebuildSuppressionConfig(t, `
+tasks:
+  build:
+    type: build
+    run: "echo build"
+    include:
+      - "**/*.jsx"
+    rebuild-suppression:
+      enabled: true
+      mode: language-aware-hash
+`)
+	fs := newRebuildSuppressionTestFS()
+	fs.addDir("./src")
+	fs.setFile("./src/component.jsx", "const view = <><span>A </span>B</>\n", time.Now())
+	runner := newRebuildSuppressionRunner(t, cfg, fs)
+	runner.initializeRebuildSuppression()
+
+	fs.setFile("./src/component.jsx", "const view = <><span>A</span>B</>\n", time.Now().Add(time.Second))
+
+	result := runner.filterUnchangedRebuildInputs(schedulableBuildTask(cfg))
+	assert.Contains(t, result, "build")
+}
+
 func TestRebuildSuppression_LanguageAwareJSPreservesComments(t *testing.T) {
 	cfg := rebuildSuppressionConfig(t, `
 tasks:
@@ -450,6 +502,30 @@ tasks:
 
 	result := runner.filterUnchangedRebuildInputs(schedulableBuildTask(cfg))
 	assert.Empty(t, result)
+}
+
+func TestRebuildSuppression_LanguageAwareSQLPreservesNewlineBetweenAdjacentStrings(t *testing.T) {
+	cfg := rebuildSuppressionConfig(t, `
+tasks:
+  build:
+    type: build
+    run: "echo build"
+    include:
+      - "**/*.sql"
+    rebuild-suppression:
+      enabled: true
+      mode: language-aware-hash
+`)
+	fs := newRebuildSuppressionTestFS()
+	fs.addDir("./schema")
+	fs.setFile("./schema/query.sql", "SELECT 'a'\n'b';\n", time.Now())
+	runner := newRebuildSuppressionRunner(t, cfg, fs)
+	runner.initializeRebuildSuppression()
+
+	fs.setFile("./schema/query.sql", "SELECT 'a' 'b';\n", time.Now().Add(time.Second))
+
+	result := runner.filterUnchangedRebuildInputs(schedulableBuildTask(cfg))
+	assert.Contains(t, result, "build")
 }
 
 func TestRebuildSuppression_LanguageAwareSQLPreservesComments(t *testing.T) {
@@ -665,6 +741,44 @@ tasks:
 	runner.ScheduledTaskMutex.Lock()
 	defer runner.ScheduledTaskMutex.Unlock()
 	assert.Empty(t, runner.ScheduledTasks)
+}
+
+func TestRebuildSuppression_ContinuousRestartAcceptsStartedFingerprint(t *testing.T) {
+	cfg := rebuildSuppressionConfig(t, `
+tasks:
+  provider:
+    type: continuous
+    run: "echo provider"
+    include:
+      - "**/*.go"
+    rebuild-suppression:
+      enabled: true
+`)
+	fs := newRebuildSuppressionTestFS()
+	fs.addDir("./src")
+	fs.setFile("./src/main.go", "package main\nvar value = 1\n", time.Now())
+	runner := newRebuildSuppressionRunner(t, cfg, fs)
+	runner.initializeRebuildSuppression()
+
+	fs.setFile("./src/main.go", "package main\nvar value = 2\n", time.Now().Add(time.Second))
+	first := runner.filterUnchangedRebuildInputs(map[string]*SchedulableTask{
+		"provider": {
+			TaskConfiguration: cfg.Tasks["provider"],
+			ModificationTime:  time.Now(),
+		},
+	})
+	assert.Contains(t, first, "provider")
+
+	runner.onTaskFinished("provider", true)
+	runner.startScheduledTask("provider", &ScheduledTask{TaskConfiguration: cfg.Tasks["provider"]})
+
+	second := runner.filterUnchangedRebuildInputs(map[string]*SchedulableTask{
+		"provider": {
+			TaskConfiguration: cfg.Tasks["provider"],
+			ModificationTime:  time.Now(),
+		},
+	})
+	assert.Empty(t, second)
 }
 
 func TestRebuildSuppression_LanguageAwareLogsDuration(t *testing.T) {

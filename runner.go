@@ -553,6 +553,7 @@ func (runner *Runner) startScheduledTask(taskId string, scheduledTask *Scheduled
 	runner.recordTaskStartTime(taskId)
 	newTask := runner.startTaskAsync(&ScheduledTask{TaskConfiguration: preparedTaskConfig}, globalEnv)
 	if newTask != nil {
+		runner.recordStartedRebuildSuppressionTask(taskId)
 		runner.onTaskStart(newTask)
 		if exportsChanged {
 			runner.scheduleConsumersForProvider(taskId)

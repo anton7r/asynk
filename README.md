@@ -127,7 +127,7 @@ tasks:
       mode: language-aware-hash
 ```
 
-`mode` can be `size-and-hash`, `size-and-mtime`, or `language-aware-hash`. Hash mode is more accurate and avoids timestamp-only rebuilds. `language-aware-hash` canonicalizes supported source files before hashing, currently Go, JS/TS-family, and SQL files, and falls back to raw hashing for unsupported extensions or source it cannot safely canonicalize. When this mode is used, asynk logs how long fingerprint construction took in milliseconds.
+`mode` can be `size-and-hash`, `size-and-mtime`, or `language-aware-hash`. Hash mode is more accurate and avoids timestamp-only rebuilds. `language-aware-hash` canonicalizes supported source files before hashing, currently Go, JS/TS script files, and SQL files, and falls back to raw hashing for unsupported extensions, JSX/TSX files, or source it cannot safely canonicalize. When this mode is used, asynk logs how long fingerprint construction took in milliseconds.
 
 ### Task commands, working directories, and environment
 
