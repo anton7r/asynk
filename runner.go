@@ -346,7 +346,7 @@ func (runner *Runner) onTaskFinished(taskIdentifier string, errored bool) {
 	runningCount := len(runner.RunningTasks)
 	runner.RunningTaskMutex.Unlock()
 
-	runner.releaseTaskPorts(taskIdentifier)
+	runner.releaseFinishedTaskPorts(taskIdentifier, errored)
 
 	if errored {
 		// In single-run mode, check if all tasks are done

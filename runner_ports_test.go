@@ -556,3 +556,45 @@ tasks:
 	assert.False(t, frontendQueued)
 	assert.False(t, factory.Called("frontend"))
 }
+
+func TestStartScheduledTasks_DoesNotStartProxyConsumerWhenProviderParseFails(t *testing.T) {
+	checker := &runnerPortChecker{unavailable: map[int]bool{}}
+	factory := &failingCommandFactory{failTask: "backend"}
+	runner := testRunnerForPortsWithFactory(t, fmt.Sprintf(`
+tasks:
+  backend:
+    type: continuous
+    run: "go run . --port ${PORT}"
+    port:
+      preferred: 3000
+      range:
+        start: 3000
+        end: 3002
+      expose:
+        name: backend
+        proxy:
+          enabled: true
+          env: API_PROXY_URL
+          preferred: %d
+  frontend:
+    type: continuous
+    run: "npm run dev"
+    consumes:
+      - task: backend
+        env:
+          VITE_API_URL: API_PROXY_URL
+`, freeRunnerPort(t)), checker, factory)
+	t.Cleanup(runner.closeManagedProxies)
+
+	runner.scheduleAllTasks()
+	runner.startScheduledTasks()
+
+	assert.True(t, factory.Called("backend"))
+	assert.False(t, factory.Called("frontend"))
+	assert.False(t, runner.canStartTask(&ScheduledTask{TaskConfiguration: runner.Config.Tasks["frontend"]}))
+
+	runner.serviceExportMutex.Lock()
+	exports := runner.serviceExports["backend"]
+	runner.serviceExportMutex.Unlock()
+	assert.Empty(t, exports)
+}

@@ -165,9 +165,26 @@ func (runner *Runner) setServiceExports(taskID string, exports map[string]string
 }
 
 func (runner *Runner) releaseTaskPorts(taskID string) {
+	runner.releaseFinishedTaskPorts(taskID, false)
+}
+
+func (runner *Runner) releaseFinishedTaskPorts(taskID string, errored bool) {
 	runner.portManager.Release(taskID)
 	runner.proxyManager.UpdateTarget(taskID, "")
+
+	if errored {
+		runner.clearServiceExports(taskID)
+		return
+	}
+
 	runner.clearDirectServiceExports(taskID)
+}
+
+func (runner *Runner) clearServiceExports(taskID string) {
+	runner.serviceExportMutex.Lock()
+	defer runner.serviceExportMutex.Unlock()
+
+	delete(runner.serviceExports, taskID)
 }
 
 func (runner *Runner) clearDirectServiceExports(taskID string) {
