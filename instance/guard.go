@@ -17,6 +17,7 @@ const (
 	ownerFileName           = "owner.json"
 	shutdownRequestFileName = "shutdown.json"
 	pollInterval            = 100 * time.Millisecond
+	ownerCreateTimeout      = 500 * time.Millisecond
 )
 
 var ErrAlreadyRunning = errors.New("asynk instance already running")
@@ -31,6 +32,7 @@ const (
 
 type ProcessProbe interface {
 	Matches(pid int, startTime time.Time) bool
+	CurrentStartTime(pid int) (time.Time, bool)
 }
 
 type Options struct {
@@ -111,7 +113,7 @@ func Acquire(options Options) (*Guard, error) {
 	}
 
 	for {
-		acquired, err := guard.tryCreate(options.Now)
+		acquired, err := guard.tryCreate(options.Now, options.Probe)
 		if err != nil {
 			return nil, err
 		}
@@ -121,6 +123,13 @@ func Acquire(options Options) (*Guard, error) {
 
 		owner, ownerData, err := readOwnerData(guard.ownerPath)
 		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				if _, _, waitErr := waitForOwnerData(guard.ownerPath, ownerCreateTimeout); waitErr == nil {
+					continue
+				} else if !errors.Is(waitErr, os.ErrNotExist) && !isMalformedOwner(waitErr) {
+					return nil, fmt.Errorf("reading instance owner: %w", waitErr)
+				}
+			}
 			if errors.Is(err, os.ErrNotExist) || isMalformedOwner(err) {
 				removed, removeErr := guard.removeStaleLockIfUnchanged(ownerData, options.beforeStaleRemove)
 				if removeErr != nil {
@@ -250,7 +259,7 @@ func (g *Guard) shutdownRequested() bool {
 	return request.Token == g.token
 }
 
-func (g *Guard) tryCreate(now func() time.Time) (bool, error) {
+func (g *Guard) tryCreate(now func() time.Time, probe ProcessProbe) (bool, error) {
 	if err := os.MkdirAll(filepath.Dir(g.lockDir), 0755); err != nil {
 		return false, fmt.Errorf("creating instance lock root: %w", err)
 	}
@@ -262,9 +271,14 @@ func (g *Guard) tryCreate(now func() time.Time) (bool, error) {
 		return false, fmt.Errorf("creating instance lock: %w", err)
 	}
 
+	startTime := now().UTC()
+	if processStart, ok := probe.CurrentStartTime(g.pid); ok {
+		startTime = processStart.UTC()
+	}
+
 	owner := Owner{
 		PID:                 g.pid,
-		StartTime:           now().UTC(),
+		StartTime:           startTime,
 		ConfigDir:           g.configDir,
 		Token:               g.token,
 		ShutdownRequestPath: g.shutdownPath,
@@ -309,6 +323,20 @@ func readOwnerData(path string) (Owner, []byte, error) {
 		return Owner{}, data, malformedOwnerError{fmt.Errorf("instance owner metadata is incomplete")}
 	}
 	return owner, data, nil
+}
+
+func waitForOwnerData(path string, timeout time.Duration) (Owner, []byte, error) {
+	deadline := time.Now().Add(timeout)
+	for {
+		owner, data, err := readOwnerData(path)
+		if err == nil || !errors.Is(err, os.ErrNotExist) {
+			return owner, data, err
+		}
+		if time.Now().After(deadline) {
+			return owner, data, err
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 type malformedOwnerError struct {
