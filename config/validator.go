@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 	"unicode"
 )
@@ -264,6 +265,70 @@ func (v *validator) validateConsumes() error {
 	return nil
 }
 
+func (v *validator) validateConsumeCycles() error {
+	visited := make(map[string]bool)
+	visiting := make(map[string]bool)
+	stack := make([]string, 0)
+
+	taskIDs := make([]string, 0, len(v.config.Tasks))
+	for taskID := range v.config.Tasks {
+		taskIDs = append(taskIDs, taskID)
+	}
+	sort.Strings(taskIDs)
+
+	var visit func(taskID string) error
+	visit = func(taskID string) error {
+		if visiting[taskID] {
+			return fmt.Errorf("invalid task configuration, consume cycle detected: %s", consumeCyclePath(stack, taskID))
+		}
+		if visited[taskID] {
+			return nil
+		}
+
+		visiting[taskID] = true
+		stack = append(stack, taskID)
+
+		consumes := append([]ConsumeConfig{}, v.config.Tasks[taskID].Consumes...)
+		sort.Slice(consumes, func(i, j int) bool {
+			return consumes[i].Task < consumes[j].Task
+		})
+		for _, consume := range consumes {
+			if _, exists := v.config.Tasks[consume.Task]; !exists {
+				continue
+			}
+			if err := visit(consume.Task); err != nil {
+				return err
+			}
+		}
+
+		stack = stack[:len(stack)-1]
+		visiting[taskID] = false
+		visited[taskID] = true
+		return nil
+	}
+
+	for _, taskID := range taskIDs {
+		if err := visit(taskID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func consumeCyclePath(stack []string, repeated string) string {
+	start := 0
+	for i, taskID := range stack {
+		if taskID == repeated {
+			start = i
+			break
+		}
+	}
+
+	cycle := append([]string{}, stack[start:]...)
+	cycle = append(cycle, repeated)
+	return strings.Join(cycle, " -> ")
+}
+
 func hasEnabledProxy(taskConfig *TaskConfig) bool {
 	return taskConfig != nil &&
 		taskConfig.Port != nil &&
@@ -387,6 +452,7 @@ func validateConfig(config *Config) error {
 		validator.validateCleanUpTasks,
 		validator.validatePortConfigs,
 		validator.validateConsumes,
+		validator.validateConsumeCycles,
 	}
 
 	for _, step := range validationSteps {

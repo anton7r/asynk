@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"sync"
@@ -93,6 +94,42 @@ func (f *recordingCommandFactory) Called(taskID string) bool {
 	return false
 }
 
+type failingCommandFactory struct {
+	mu       sync.Mutex
+	failTask string
+	calls    []string
+}
+
+func (f *failingCommandFactory) ParseAllCommands(
+	commands config.RunCommands,
+	taskId string,
+	log *zap.Logger,
+	env map[string]string,
+	cwd string,
+	genIdInterpolator *idgen.GenIDInterpolator,
+) ([]*cmdwrap.CommandWrapper, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.calls = append(f.calls, taskId)
+	if taskId == f.failTask {
+		return nil, errors.New("parse failed")
+	}
+	return []*cmdwrap.CommandWrapper{}, nil
+}
+
+func (f *failingCommandFactory) Called(taskID string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	for _, call := range f.calls {
+		if call == taskID {
+			return true
+		}
+	}
+	return false
+}
+
 func TestPrepareTaskForStart_AssignsPortToEnvAndInterpolationMap(t *testing.T) {
 	checker := &runnerPortChecker{unavailable: map[int]bool{}}
 	runner := testRunnerForPorts(t, `
@@ -142,6 +179,45 @@ tasks:
 	require.NoError(t, err)
 	assert.True(t, changed)
 	assert.Equal(t, "3001", globalEnv["PORT"])
+}
+
+func TestPrepareTaskForStart_ProxyReservationDoesNotCollideWithTaskID(t *testing.T) {
+	proxyPort := freeRunnerPort(t)
+	if proxyPort >= 65535 {
+		t.Skip("free port is too high for fallback range")
+	}
+	fallbackPort := proxyPort + 1
+
+	checker := &runnerPortChecker{unavailable: map[int]bool{}}
+	runner := testRunnerForPorts(t, fmt.Sprintf(`
+tasks:
+  api:
+    type: continuous
+    run: "go run . --port ${PORT}"
+    port:
+      preferred: 3000
+      expose:
+        proxy:
+          enabled: true
+          preferred: %d
+  api:proxy:
+    type: continuous
+    run: "go run . --port ${PORT}"
+    port:
+      preferred: %d
+      range:
+        start: %d
+        end: %d
+`, proxyPort, proxyPort, proxyPort, fallbackPort), checker)
+	t.Cleanup(runner.closeManagedProxies)
+
+	_, _, _, err := runner.prepareTaskForStart(runner.Config.Tasks["api"])
+	require.NoError(t, err)
+
+	_, globalEnv, _, err := runner.prepareTaskForStart(runner.Config.Tasks["api:proxy"])
+	require.NoError(t, err)
+
+	assert.Equal(t, fmt.Sprintf("%d", fallbackPort), globalEnv["PORT"])
 }
 
 func TestPrepareTaskForStart_InjectsDirectConsumerEnv(t *testing.T) {
@@ -440,4 +516,43 @@ tasks:
 
 		return queued || factory.Called("frontend")
 	}, time.Second, 10*time.Millisecond)
+}
+
+func TestStartScheduledTask_DoesNotScheduleConsumersWhenProviderParseFails(t *testing.T) {
+	checker := &runnerPortChecker{unavailable: map[int]bool{}}
+	factory := &failingCommandFactory{failTask: "backend"}
+	runner := testRunnerForPortsWithFactory(t, `
+tasks:
+  backend:
+    type: continuous
+    run: "go run . --port ${PORT}"
+    port:
+      preferred: 3000
+      range:
+        start: 3000
+        end: 3002
+  frontend:
+    type: continuous
+    run: "npm run dev"
+    consumes:
+      - task: backend
+        env:
+          VITE_API_URL: url
+`, checker, factory)
+
+	runner.startScheduledTask("backend", &ScheduledTask{TaskConfiguration: runner.Config.Tasks["backend"]})
+
+	assert.Eventually(t, func() bool {
+		runner.RunningTaskMutex.Lock()
+		backendRunning := runner.isTaskRunning("backend")
+		runner.RunningTaskMutex.Unlock()
+		return !backendRunning
+	}, time.Second, 10*time.Millisecond)
+
+	runner.ScheduledTaskMutex.Lock()
+	frontendQueued := runner.ScheduledTasks["frontend"] != nil
+	runner.ScheduledTaskMutex.Unlock()
+
+	assert.False(t, frontendQueued)
+	assert.False(t, factory.Called("frontend"))
 }

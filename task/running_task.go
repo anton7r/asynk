@@ -237,6 +237,13 @@ func (r *RunningTask) Wait() {
 	<-r.done
 }
 
+func (r *RunningTask) StartupError() error {
+	if r == nil {
+		return nil
+	}
+	return r.parseErr
+}
+
 func (r RunningTask) TaskId() string {
 	return r.taskConfig.Identifier
 }

@@ -583,6 +583,14 @@ func (r *Runner) startTaskAsync(
 		return nil
 	}
 
+	if err := runningTask.StartupError(); err != nil {
+		r.log.Error("Failed to create running task",
+			zap.String("taskId", scheduledTask.TaskConfiguration.Identifier),
+			zap.Error(err))
+		r.onTaskFinished(scheduledTask.TaskConfiguration.Identifier, true)
+		return nil
+	}
+
 	// Start the task in a new goroutine to avoid blocking the main thread
 	go runningTask.Start()
 	return runningTask

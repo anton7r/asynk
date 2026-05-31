@@ -14,6 +14,7 @@ import (
 )
 
 const localHTTPHost = "127.0.0.1"
+const proxyReservationPrefix = "\x00asynk-proxy:"
 
 func (runner *Runner) prepareTaskForStart(taskConfig *config.TaskConfig) (*config.TaskConfig, map[string]string, bool, error) {
 	generatedEnv, err := runner.generatedConsumerEnv(taskConfig)
@@ -420,7 +421,7 @@ func providerHasProxy(taskConfig *config.TaskConfig) bool {
 }
 
 func proxyReservationID(taskID string) string {
-	return taskID + ":proxy"
+	return proxyReservationPrefix + taskID
 }
 
 func stringMapsEqual(a map[string]string, b map[string]string) bool {

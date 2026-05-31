@@ -432,6 +432,35 @@ tasks:
 	assert.Nil(t, cfg)
 }
 
+func TestLoadFromBytes_ConsumesRejectsCycles(t *testing.T) {
+	yml := []byte(`
+tasks:
+  api:
+    type: continuous
+    run: "go run ./api"
+    port:
+      preferred: 3000
+    consumes:
+      - task: web
+        env:
+          WEB_URL: url
+  web:
+    type: continuous
+    run: "npm run dev"
+    port:
+      preferred: 3001
+    consumes:
+      - task: api
+        env:
+          API_URL: url
+`)
+	cfg, err := LoadFromBytes(yml)
+	if assert.Error(t, err) {
+		assert.Contains(t, err.Error(), "consume cycle")
+	}
+	assert.Nil(t, cfg)
+}
+
 func TestLoadFromBytes_PortConfigRejectsProxyEnvShadowingBuiltInExport(t *testing.T) {
 	yml := []byte(`
 tasks:
