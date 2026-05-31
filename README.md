@@ -58,6 +58,9 @@ shared:
     log-level: info
     # Values loaded from env files are available for interpolation and child processes.
     env-files: [.env]
+    # Debounces filesystem events before affected tasks are scheduled.
+    # Defaults to 200ms. Use 0ms to disable debounce globally.
+    fs-debounce: 200ms
     # Excludes directories globally for all the configurations
     # For example if you want to ignore node_modules folder.
     # Supports glob patterns
@@ -88,6 +91,8 @@ tasks:
         run:
           command: go
           args: [build, -o, ./bin/app]
+        # Overrides shared.fs-debounce for this task.
+        fs-debounce: 500ms
         # Watches for all go file changes under the project root
         include: **.go
 

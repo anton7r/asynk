@@ -92,7 +92,6 @@ func TestCheckIfWeNeedToNotify(t *testing.T) {
 	assert.NoError(t, err)
 	f.Close()
 
-	// Setup test directories
 	dirs := &WatchableDirectories{
 		directories: map[string]WatchableDirectory{
 			testDirPath: {
@@ -151,7 +150,6 @@ func TestHandleFsEvent(t *testing.T) {
 	assert.NoError(t, err)
 	f.Close()
 
-	// Setup test directories
 	dirs := &WatchableDirectories{
 		directories: map[string]WatchableDirectory{
 			testDirPath: {

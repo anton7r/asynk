@@ -705,6 +705,78 @@ func TestNewWatcherWithDeps_InitializesCorrectly(t *testing.T) {
 	w.Close()
 }
 
+func TestWatcherFSDebounceForTasks_Default(t *testing.T) {
+	logger := zap.NewNop()
+	mfs := newMockFS()
+	fw := newTestFsWatcher()
+	dirs := &WatchableDirectories{directories: make(map[string]WatchableDirectory)}
+
+	w, err := NewWatcherWithDeps(logger, dirs, func(events map[string]AggregatedEvent) {}, mfs, fw)
+	assert.NoError(t, err)
+
+	delay := w.fsDebounceForTasks(map[string]bool{"build": true})
+	assert.Equal(t, 200*time.Millisecond, delay)
+
+	w.Close()
+}
+
+func TestWatcherFSDebounceForTasks_UsesMaximumTaskDebounce(t *testing.T) {
+	logger := zap.NewNop()
+	mfs := newMockFS()
+	fw := newTestFsWatcher()
+	dirs := &WatchableDirectories{directories: make(map[string]WatchableDirectory)}
+
+	w, err := NewWatcherWithDepsAndOptions(
+		logger,
+		dirs,
+		func(events map[string]AggregatedEvent) {},
+		mfs,
+		fw,
+		WatcherOptions{
+			DefaultFSDebounce:    100 * time.Millisecond,
+			DefaultFSDebounceSet: true,
+			TaskFSDebounces: map[string]time.Duration{
+				"fast": 50 * time.Millisecond,
+				"slow": 750 * time.Millisecond,
+			},
+		},
+	)
+	assert.NoError(t, err)
+
+	delay := w.fsDebounceForTasks(map[string]bool{"fast": true, "slow": true})
+	assert.Equal(t, 750*time.Millisecond, delay)
+
+	w.Close()
+}
+
+func TestWatcherFSDebounceForTasks_AllowsZeroTaskDebounce(t *testing.T) {
+	logger := zap.NewNop()
+	mfs := newMockFS()
+	fw := newTestFsWatcher()
+	dirs := &WatchableDirectories{directories: make(map[string]WatchableDirectory)}
+
+	w, err := NewWatcherWithDepsAndOptions(
+		logger,
+		dirs,
+		func(events map[string]AggregatedEvent) {},
+		mfs,
+		fw,
+		WatcherOptions{
+			DefaultFSDebounce:    100 * time.Millisecond,
+			DefaultFSDebounceSet: true,
+			TaskFSDebounces: map[string]time.Duration{
+				"instant": 0,
+			},
+		},
+	)
+	assert.NoError(t, err)
+
+	delay := w.fsDebounceForTasks(map[string]bool{"instant": true})
+	assert.Equal(t, time.Duration(0), delay)
+
+	w.Close()
+}
+
 func TestNewWatcherWithDeps_NilFsWatcherCreatesReal(t *testing.T) {
 	logger := zap.NewNop()
 	mfs := newMockFS()

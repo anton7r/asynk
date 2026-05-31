@@ -128,7 +128,22 @@ func NewRunnerWithDeps(configuration *config.Config, log *zap.Logger, runOnce bo
 	if !runOnce {
 		watchableDirectories := watcher.MatchWatchableDirectoriesWithFS(log, configuration.Shared.Exclude, configuration.Tasks, deps.FS)
 		var err error
-		runner.watch, err = watcher.NewWatcherWithDeps(log, watchableDirectories, runner.onFileChange, deps.FS, nil)
+		defaultFSDebounce := config.DefaultFSDebounce
+		if configuration.Shared.FSDebounce.IsSet() {
+			defaultFSDebounce = configuration.Shared.FSDebounce.Duration
+		}
+		runner.watch, err = watcher.NewWatcherWithDepsAndOptions(
+			log,
+			watchableDirectories,
+			runner.onFileChange,
+			deps.FS,
+			nil,
+			watcher.WatcherOptions{
+				DefaultFSDebounce:    defaultFSDebounce,
+				DefaultFSDebounceSet: true,
+				TaskFSDebounces:      configuration.TaskFSDebounces(),
+			},
+		)
 		if err != nil {
 			log.Error("Error creating watcher", zap.Error(err))
 		}

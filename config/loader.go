@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"path/filepath"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -27,6 +28,8 @@ const (
 	// Clean up strategy that removes all files matching the glob pattern except the latest one
 	CleanUpStrategy_KeepLatest CleanUpStrategy = "keep-latest"
 )
+
+const DefaultFSDebounce = 200 * time.Millisecond
 
 type ConsumeMode string
 
@@ -92,6 +95,8 @@ type TaskConfig struct {
 	RunMac     RunCommands `yaml:"run-mac"`
 	Cwd        string      `yaml:"cwd"`
 	WorkingDir string      `yaml:"working-dir"`
+	// Debounce duration for filesystem events affecting this task.
+	FSDebounce util.Duration `yaml:"fs-debounce"`
 	// Glob pattern to match files to trigger the task
 	Include util.GlobArray `yaml:"include"`
 	// Glob pattern to exclude files from triggering the task
@@ -121,6 +126,7 @@ type SharedConfig struct {
 	ReloadOnConfigChange bool             `yaml:"reload-on-config-change"`
 	LogLevel             string           `yaml:"log-level"`
 	EnvFiles             util.StringArray `yaml:"env-files"`
+	FSDebounce           util.Duration    `yaml:"fs-debounce"`
 }
 
 // The tasks id comes from the keys in the YAML file.
@@ -199,6 +205,26 @@ func fillTaskIds(config *Config) {
 	for taskId, taskConfig := range config.CleanUpTasks {
 		taskConfig.Identifier = taskId
 	}
+}
+
+func (config *Config) EffectiveFSDebounceForTask(taskId string) time.Duration {
+	if taskConfig, exists := config.Tasks[taskId]; exists && taskConfig.FSDebounce.IsSet() {
+		return taskConfig.FSDebounce.Duration
+	}
+
+	if config.Shared.FSDebounce.IsSet() {
+		return config.Shared.FSDebounce.Duration
+	}
+
+	return DefaultFSDebounce
+}
+
+func (config *Config) TaskFSDebounces() map[string]time.Duration {
+	debounces := make(map[string]time.Duration, len(config.Tasks))
+	for taskId := range config.Tasks {
+		debounces[taskId] = config.EffectiveFSDebounceForTask(taskId)
+	}
+	return debounces
 }
 
 // persistent hashes could be a useful feature for large projects.

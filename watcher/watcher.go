@@ -14,6 +14,8 @@ import (
 	"go.uber.org/zap"
 )
 
+const DefaultFSDebounce = 200 * time.Millisecond
+
 type Watcher struct {
 	directories          *WatchableDirectories
 	watcher              FsWatcher
@@ -21,6 +23,14 @@ type Watcher struct {
 	aggregator           *FileEventAggregator
 	propagateChangeEvent func(events map[string]AggregatedEvent)
 	fs                   util.FileSystem
+	defaultFSDebounce    time.Duration
+	taskFSDebounces      map[string]time.Duration
+}
+
+type WatcherOptions struct {
+	DefaultFSDebounce    time.Duration
+	DefaultFSDebounceSet bool
+	TaskFSDebounces      map[string]time.Duration
 }
 
 type UpdatedFile struct {
@@ -53,6 +63,15 @@ func NewWatcher(
 	return NewWatcherWithDeps(log, watchedDirectories, propagateChangeEvent, util.NewOSFileSystem(), nil)
 }
 
+func NewWatcherWithOptions(
+	log *zap.Logger,
+	watchedDirectories *WatchableDirectories,
+	propagateChangeEvent func(events map[string]AggregatedEvent),
+	options WatcherOptions,
+) (*Watcher, error) {
+	return NewWatcherWithDepsAndOptions(log, watchedDirectories, propagateChangeEvent, util.NewOSFileSystem(), nil, options)
+}
+
 // NewWatcherWithDeps creates a Watcher with injected dependencies for testing.
 // If fsWatcher is nil, a real fsnotify watcher will be created.
 func NewWatcherWithDeps(
@@ -61,6 +80,17 @@ func NewWatcherWithDeps(
 	propagateChangeEvent func(events map[string]AggregatedEvent),
 	fs util.FileSystem,
 	fsWatcher FsWatcher,
+) (*Watcher, error) {
+	return NewWatcherWithDepsAndOptions(log, watchedDirectories, propagateChangeEvent, fs, fsWatcher, WatcherOptions{})
+}
+
+func NewWatcherWithDepsAndOptions(
+	log *zap.Logger,
+	watchedDirectories *WatchableDirectories,
+	propagateChangeEvent func(events map[string]AggregatedEvent),
+	fs util.FileSystem,
+	fsWatcher FsWatcher,
+	options WatcherOptions,
 ) (*Watcher, error) {
 	if fsWatcher == nil {
 		var err error
@@ -74,12 +104,19 @@ func NewWatcherWithDeps(
 		fs = util.NewOSFileSystem()
 	}
 
+	defaultFSDebounce := DefaultFSDebounce
+	if options.DefaultFSDebounceSet {
+		defaultFSDebounce = options.DefaultFSDebounce
+	}
+
 	w := &Watcher{
 		watcher:              fsWatcher,
 		log:                  log,
 		directories:          watchedDirectories,
 		propagateChangeEvent: propagateChangeEvent,
 		fs:                   fs,
+		defaultFSDebounce:    defaultFSDebounce,
+		taskFSDebounces:      copyTaskFSDebounces(options.TaskFSDebounces),
 		aggregator: &FileEventAggregator{
 			aggregated:     make(map[string]AggregatedEvent),
 			aggregatorLock: sync.Mutex{},
@@ -88,6 +125,14 @@ func NewWatcherWithDeps(
 	}
 
 	return w, nil
+}
+
+func copyTaskFSDebounces(source map[string]time.Duration) map[string]time.Duration {
+	debounces := make(map[string]time.Duration, len(source))
+	for taskId, debounce := range source {
+		debounces[taskId] = debounce
+	}
+	return debounces
 }
 
 func (w *Watcher) Close() {
@@ -222,11 +267,12 @@ func (w *Watcher) checkIfWeNeedToNotify(
 			event.Tasks[taskId] = true
 		}
 		w.aggregator.aggregated[eventDirPath] = event
-		delay := time.Millisecond * 200
+		delay := w.fsDebounceForTasks(tasks)
 		w.aggregator.changeId++
+		changeId := w.aggregator.changeId
 		w.aggregator.aggregatorLock.Unlock()
 
-		go w.propagateEvents(delay, w.aggregator.changeId)
+		go w.propagateEvents(delay, changeId)
 	}
 }
 
@@ -259,6 +305,29 @@ func pathWithDirectoryStyle(targetDirPath string, sourceDirPath string, sourceFi
 		suffix = strings.ReplaceAll(suffix, "/", "\\")
 	}
 	return targetDirPath + suffix
+}
+
+func (w *Watcher) fsDebounceForTasks(tasks map[string]bool) time.Duration {
+	var delay time.Duration
+	first := true
+
+	for taskId := range tasks {
+		taskDelay, exists := w.taskFSDebounces[taskId]
+		if !exists {
+			taskDelay = w.defaultFSDebounce
+		}
+
+		if first || taskDelay > delay {
+			delay = taskDelay
+			first = false
+		}
+	}
+
+	if first {
+		return w.defaultFSDebounce
+	}
+
+	return delay
 }
 
 // If the changeId matches the current changeId, we propagate the events.
