@@ -253,7 +253,7 @@ func (g *Guard) StartShutdownMonitor(ctx context.Context, onShutdown func()) {
 		return
 	}
 	if info, err := os.Stat(g.shutdownPath); err == nil {
-		if g.acquiredAt.IsZero() || !info.ModTime().After(g.acquiredAt) {
+		if g.existingShutdownRequestSeen(info.ModTime()) {
 			g.shutdownModTime = info.ModTime()
 		}
 	}
@@ -276,6 +276,18 @@ func (g *Guard) StartShutdownMonitor(ctx context.Context, onShutdown func()) {
 	}()
 }
 
+func (g *Guard) existingShutdownRequestSeen(modTime time.Time) bool {
+	if g.acquiredAt.IsZero() || modTime.Before(g.acquiredAt) {
+		return true
+	}
+	if modTime.After(g.acquiredAt) {
+		return false
+	}
+
+	request, ok := g.readShutdownRequest()
+	return ok && request.Token == g.token && !request.RequestedAt.After(g.acquiredAt)
+}
+
 func (g *Guard) shutdownRequested() bool {
 	info, err := os.Stat(g.shutdownPath)
 	if err != nil {
@@ -285,13 +297,8 @@ func (g *Guard) shutdownRequested() bool {
 		return false
 	}
 
-	data, err := os.ReadFile(g.shutdownPath)
-	if err != nil {
-		return false
-	}
-
-	var request shutdownRequest
-	if err := json.Unmarshal(data, &request); err != nil {
+	request, ok := g.readShutdownRequest()
+	if !ok {
 		return false
 	}
 
@@ -301,6 +308,19 @@ func (g *Guard) shutdownRequested() bool {
 
 	g.shutdownModTime = info.ModTime()
 	return true
+}
+
+func (g *Guard) readShutdownRequest() (shutdownRequest, bool) {
+	data, err := os.ReadFile(g.shutdownPath)
+	if err != nil {
+		return shutdownRequest{}, false
+	}
+
+	var request shutdownRequest
+	if err := json.Unmarshal(data, &request); err != nil {
+		return shutdownRequest{}, false
+	}
+	return request, true
 }
 
 func (g *Guard) tryCreate(now func() time.Time, probe ProcessProbe) (bool, error) {
