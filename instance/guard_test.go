@@ -555,6 +555,71 @@ func TestAcquireReplaceRetriesWhenOwnerChangesBeforeShutdownRequest(t *testing.T
 	assert.Equal(t, "new-token", owner.Token)
 }
 
+func TestAcquireReplaceCanceledBeforeShutdownDoesNotWriteRequest(t *testing.T) {
+	root := t.TempDir()
+	configDir := filepath.Join(root, "repo")
+	lockDir := createOwner(t, root, configDir, Owner{
+		PID:       1451,
+		StartTime: time.Now().UTC(),
+		Token:     "existing-token",
+	})
+	shutdownPath := filepath.Join(lockDir, shutdownRequestFileName)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	guard, err := Acquire(Options{
+		Context:        ctx,
+		ConfigDir:      configDir,
+		Policy:         PolicyReplace,
+		ReplaceTimeout: time.Second,
+		RootDir:        root,
+		PID:            1452,
+		Probe:          fakeProbe{matches: map[int]bool{1451: true}},
+	})
+
+	assert.Nil(t, guard)
+	require.ErrorIs(t, err, context.Canceled)
+	assert.NoFileExists(t, shutdownPath)
+}
+
+func TestAcquireReplaceWaitObservesContextCancellation(t *testing.T) {
+	root := t.TempDir()
+	configDir := filepath.Join(root, "repo")
+	lockDir := createOwner(t, root, configDir, Owner{
+		PID:       1461,
+		StartTime: time.Now().UTC(),
+		Token:     "existing-token",
+	})
+	shutdownPath := filepath.Join(lockDir, shutdownRequestFileName)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cancelled := make(chan struct{})
+	go func() {
+		defer close(cancelled)
+		for {
+			if _, err := os.Stat(shutdownPath); err == nil {
+				cancel()
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}()
+
+	guard, err := Acquire(Options{
+		Context:        ctx,
+		ConfigDir:      configDir,
+		Policy:         PolicyReplace,
+		ReplaceTimeout: time.Second,
+		RootDir:        root,
+		PID:            1462,
+		Probe:          fakeProbe{matches: map[int]bool{1461: true}},
+	})
+
+	assert.Nil(t, guard)
+	require.ErrorIs(t, err, context.Canceled)
+	<-cancelled
+}
+
 func TestShutdownRequestedRetriesMalformedRequestWithSameModTime(t *testing.T) {
 	root := t.TempDir()
 	shutdownPath := filepath.Join(root, shutdownRequestFileName)
@@ -581,15 +646,18 @@ func TestShutdownRequestedRetriesMalformedRequestWithSameModTime(t *testing.T) {
 func TestStartShutdownMonitorIgnoresRequestsWrittenBeforeMonitorStarts(t *testing.T) {
 	root := t.TempDir()
 	shutdownPath := filepath.Join(root, shutdownRequestFileName)
+	requestedAt := time.Now().Add(-time.Second)
 	guard := &Guard{
 		shutdownPath: shutdownPath,
 		token:        "owner-token",
+		acquiredAt:   requestedAt.Add(time.Second),
 	}
 	require.NoError(t, writeJSON(shutdownPath, shutdownRequest{
 		Token:       "owner-token",
 		RequestedBy: 1501,
-		RequestedAt: time.Now().Add(-time.Second),
+		RequestedAt: requestedAt,
 	}))
+	require.NoError(t, os.Chtimes(shutdownPath, requestedAt, requestedAt))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -602,6 +670,37 @@ func TestStartShutdownMonitorIgnoresRequestsWrittenBeforeMonitorStarts(t *testin
 	case <-called:
 		t.Fatal("shutdown monitor should ignore requests created before monitoring starts")
 	case <-time.After(pollInterval + 50*time.Millisecond):
+	}
+}
+
+func TestStartShutdownMonitorHandlesRequestsWrittenAfterAcquisitionBeforeMonitorStarts(t *testing.T) {
+	root := t.TempDir()
+	shutdownPath := filepath.Join(root, shutdownRequestFileName)
+	acquiredAt := time.Now().Add(-time.Second)
+	guard := &Guard{
+		shutdownPath: shutdownPath,
+		token:        "owner-token",
+		acquiredAt:   acquiredAt,
+	}
+	require.NoError(t, writeJSON(shutdownPath, shutdownRequest{
+		Token:       "owner-token",
+		RequestedBy: 1502,
+		RequestedAt: time.Now(),
+	}))
+	requestModTime := acquiredAt.Add(500 * time.Millisecond)
+	require.NoError(t, os.Chtimes(shutdownPath, requestModTime, requestModTime))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	called := make(chan struct{}, 1)
+	guard.StartShutdownMonitor(ctx, func() {
+		called <- struct{}{}
+	})
+
+	select {
+	case <-called:
+	case <-time.After(pollInterval + 50*time.Millisecond):
+		t.Fatal("shutdown monitor should handle requests written after guard acquisition")
 	}
 }
 
