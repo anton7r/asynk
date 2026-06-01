@@ -186,6 +186,26 @@ tasks:
 	assert.Nil(t, cfg)
 }
 
+func TestLoadFromBytes_InstanceConfigRejectsReplaceTimeoutAtPollInterval(t *testing.T) {
+	yml := []byte(`
+shared:
+  instance:
+    policy: replace
+    replace-timeout: 100ms
+tasks:
+  app:
+    type: continuous
+    run: "echo hello"
+`)
+	cfg, err := LoadFromBytes(yml)
+
+	if assert.Error(t, err) {
+		assert.Contains(t, err.Error(), "replace-timeout")
+		assert.Contains(t, err.Error(), "100ms")
+	}
+	assert.Nil(t, cfg)
+}
+
 func TestLoadFromBytes_FSDebounce(t *testing.T) {
 	yml := []byte(`
 shared:

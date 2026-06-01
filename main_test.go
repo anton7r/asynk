@@ -54,6 +54,15 @@ func TestSignalContextForRunOnceDoesNotInstallCancelableContext(t *testing.T) {
 	assert.NoError(t, ctx.Err())
 }
 
+func TestSignalContextStopDoesNotCancelWatchContext(t *testing.T) {
+	ctx, stop := signalContextForMode(false)
+	defer stop()
+
+	stop()
+
+	assert.NoError(t, ctx.Err())
+}
+
 func TestMainStartsShutdownMonitorBeforeRunnerInitialization(t *testing.T) {
 	source, err := os.ReadFile("main.go")
 	require.NoError(t, err)
@@ -65,6 +74,19 @@ func TestMainStartsShutdownMonitorBeforeRunnerInitialization(t *testing.T) {
 	require.NotEqual(t, -1, monitorIndex)
 	require.NotEqual(t, -1, runnerIndex)
 	assert.Less(t, monitorIndex, runnerIndex)
+}
+
+func TestMainRestoresSignalDefaultsBeforeRunnerInitialization(t *testing.T) {
+	source, err := os.ReadFile("main.go")
+	require.NoError(t, err)
+
+	text := string(source)
+	stopAcquireSignalsIndex := strings.Index(text, "guard.StartShutdownMonitor(watchCtx, cancelWatch)\n\t\tstopAcquireSignalsNow()")
+	runnerIndex := strings.Index(text, "NewRunner")
+
+	require.NotEqual(t, -1, stopAcquireSignalsIndex)
+	require.NotEqual(t, -1, runnerIndex)
+	assert.Less(t, stopAcquireSignalsIndex, runnerIndex)
 }
 
 func TestAcquireConfiguredInstanceGuardPassesContext(t *testing.T) {

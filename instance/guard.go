@@ -10,9 +10,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"time"
+	"unicode"
 )
 
 const (
@@ -21,6 +21,8 @@ const (
 	pollInterval            = 100 * time.Millisecond
 	ownerCreateTimeout      = 500 * time.Millisecond
 )
+
+var pathCaseInsensitive = detectPathCaseInsensitive
 
 var ErrAlreadyRunning = errors.New("asynk instance already running")
 
@@ -349,10 +351,55 @@ func lockDir(rootDir, configDir string) (string, error) {
 }
 
 func lockKeyConfigDir(configDir string) string {
-	if runtime.GOOS == "windows" || runtime.GOOS == "darwin" {
+	if insensitive, ok := pathCaseInsensitive(configDir); ok && insensitive {
 		return strings.ToLower(configDir)
 	}
 	return configDir
+}
+
+func detectPathCaseInsensitive(path string) (bool, bool) {
+	variant, changed := swapPathCase(path)
+	if !changed {
+		return false, false
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		return false, false
+	}
+
+	variantInfo, err := os.Stat(variant)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, true
+		}
+		return false, false
+	}
+
+	return os.SameFile(info, variantInfo), true
+}
+
+func swapPathCase(path string) (string, bool) {
+	var builder strings.Builder
+	changed := false
+
+	for _, r := range path {
+		lower := unicode.ToLower(r)
+		upper := unicode.ToUpper(r)
+		if lower == upper {
+			builder.WriteRune(r)
+			continue
+		}
+
+		changed = true
+		if r == lower {
+			builder.WriteRune(upper)
+		} else {
+			builder.WriteRune(lower)
+		}
+	}
+
+	return builder.String(), changed
 }
 
 func readOwner(path string) (Owner, error) {
