@@ -39,6 +39,11 @@ func main() {
 	}
 	log := createLogger(logLevel)
 
+	signalCtx, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stopSignals()
+	ctx, cancel := context.WithCancel(signalCtx)
+	defer cancel()
+
 	guard, err := acquireConfiguredInstanceGuard(configuration, *runOnce, instance.Acquire)
 	if err != nil {
 		fmt.Printf("Error acquiring instance guard: %v\n", err)
@@ -62,10 +67,6 @@ func main() {
 		log.Info("All tasks completed. Exiting.")
 	} else {
 		log.Info("Press Ctrl+C to stop Asynk.")
-		signalCtx, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-		defer stopSignals()
-		ctx, cancel := context.WithCancel(signalCtx)
-		defer cancel()
 
 		guard.StartShutdownMonitor(ctx, cancel)
 

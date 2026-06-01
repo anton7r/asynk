@@ -1,6 +1,7 @@
 package instance
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -575,6 +576,33 @@ func TestShutdownRequestedRetriesMalformedRequestWithSameModTime(t *testing.T) {
 	require.NoError(t, os.Chtimes(shutdownPath, modTime, modTime))
 
 	assert.True(t, guard.shutdownRequested())
+}
+
+func TestStartShutdownMonitorIgnoresRequestsWrittenBeforeMonitorStarts(t *testing.T) {
+	root := t.TempDir()
+	shutdownPath := filepath.Join(root, shutdownRequestFileName)
+	guard := &Guard{
+		shutdownPath: shutdownPath,
+		token:        "owner-token",
+	}
+	require.NoError(t, writeJSON(shutdownPath, shutdownRequest{
+		Token:       "owner-token",
+		RequestedBy: 1501,
+		RequestedAt: time.Now().Add(-time.Second),
+	}))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	called := make(chan struct{}, 1)
+	guard.StartShutdownMonitor(ctx, func() {
+		called <- struct{}{}
+	})
+
+	select {
+	case <-called:
+		t.Fatal("shutdown monitor should ignore requests created before monitoring starts")
+	case <-time.After(pollInterval + 50*time.Millisecond):
+	}
 }
 
 func createOwner(t *testing.T, root, configDir string, owner Owner) string {
