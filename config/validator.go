@@ -197,10 +197,12 @@ func (v *validator) validateInstanceConfig() error {
 	}
 
 	if v.config.Shared.Instance.ReplaceTimeout.IsSet() &&
+		v.config.EffectiveInstancePolicy() == InstancePolicy_Replace &&
 		v.config.Shared.Instance.ReplaceTimeout.Duration <= 0 {
 		return fmt.Errorf("invalid shared instance replace-timeout configuration, duration must be positive")
 	}
 	if v.config.Shared.Instance.ReplaceTimeout.IsSet() &&
+		v.config.EffectiveInstancePolicy() == InstancePolicy_Replace &&
 		v.config.Shared.Instance.ReplaceTimeout.Duration <= minimumInstanceReplaceTimeout {
 		return fmt.Errorf("invalid shared instance replace-timeout configuration, duration must be longer than %s", minimumInstanceReplaceTimeout)
 	}

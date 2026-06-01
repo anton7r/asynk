@@ -124,6 +124,47 @@ tasks:
 	}
 }
 
+func TestLoadFromBytes_InstanceReplaceTimeoutLimitsApplyOnlyToReplacePolicy(t *testing.T) {
+	tests := []struct {
+		name       string
+		instance   string
+		wantPolicy InstancePolicy
+	}{
+		{
+			name: "default allow",
+			instance: `
+    replace-timeout: 1s`,
+			wantPolicy: InstancePolicy_Allow,
+		},
+		{
+			name: "block",
+			instance: `
+    policy: block
+    replace-timeout: 1s`,
+			wantPolicy: InstancePolicy_Block,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			yml := []byte(`
+shared:
+  instance:` + tt.instance + `
+tasks:
+  app:
+    type: continuous
+    run: "echo hello"
+`)
+			cfg, err := LoadFromBytes(yml)
+
+			if assert.NoError(t, err) && assert.NotNil(t, cfg) {
+				assert.Equal(t, tt.wantPolicy, cfg.EffectiveInstancePolicy())
+				assert.Equal(t, time.Second, cfg.EffectiveInstanceReplaceTimeout())
+			}
+		})
+	}
+}
+
 func TestLoadFromBytes_InstanceConfigRejectsInvalidPolicy(t *testing.T) {
 	yml := []byte(`
 shared:
