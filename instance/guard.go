@@ -236,6 +236,9 @@ func (g *Guard) StartShutdownMonitor(ctx context.Context, onShutdown func()) {
 	if g == nil || onShutdown == nil {
 		return
 	}
+	if info, err := os.Stat(g.shutdownPath); err == nil {
+		g.shutdownModTime = info.ModTime()
+	}
 
 	go func() {
 		ticker := time.NewTicker(pollInterval)

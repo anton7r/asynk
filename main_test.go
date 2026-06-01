@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -27,6 +29,19 @@ func TestAcquireConfiguredInstanceGuardBypassesRunOnce(t *testing.T) {
 	require.NoError(t, err)
 	assert.Nil(t, guard)
 	assert.False(t, called)
+}
+
+func TestMainInstallsSignalContextBeforeInstanceAcquisition(t *testing.T) {
+	source, err := os.ReadFile("main.go")
+	require.NoError(t, err)
+
+	text := string(source)
+	signalIndex := strings.Index(text, "signal.NotifyContext")
+	acquireIndex := strings.Index(text, "acquireConfiguredInstanceGuard")
+
+	require.NotEqual(t, -1, signalIndex)
+	require.NotEqual(t, -1, acquireIndex)
+	assert.Less(t, signalIndex, acquireIndex)
 }
 
 func TestAcquireConfiguredInstanceGuardUsesWatchModeConfig(t *testing.T) {
