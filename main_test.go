@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"strings"
 	"testing"
@@ -21,7 +22,7 @@ func TestAcquireConfiguredInstanceGuardBypassesRunOnce(t *testing.T) {
 		},
 	}
 
-	guard, err := acquireConfiguredInstanceGuard(cfg, true, func(options instance.Options) (*instance.Guard, error) {
+	guard, err := acquireConfiguredInstanceGuard(context.Background(), cfg, true, func(options instance.Options) (*instance.Guard, error) {
 		called = true
 		return nil, nil
 	})
@@ -44,6 +45,39 @@ func TestMainInstallsSignalContextBeforeInstanceAcquisition(t *testing.T) {
 	assert.Less(t, signalIndex, acquireIndex)
 }
 
+func TestMainStartsShutdownMonitorBeforeRunnerInitialization(t *testing.T) {
+	source, err := os.ReadFile("main.go")
+	require.NoError(t, err)
+
+	text := string(source)
+	monitorIndex := strings.Index(text, "StartShutdownMonitor")
+	runnerIndex := strings.Index(text, "NewRunner")
+
+	require.NotEqual(t, -1, monitorIndex)
+	require.NotEqual(t, -1, runnerIndex)
+	assert.Less(t, monitorIndex, runnerIndex)
+}
+
+func TestAcquireConfiguredInstanceGuardPassesContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cfg := &config.Config{
+		ConfigDir: "/repo",
+		Shared: config.SharedConfig{
+			Instance: config.InstanceConfig{Policy: config.InstancePolicy_Block},
+		},
+	}
+
+	var captured instance.Options
+	_, err := acquireConfiguredInstanceGuard(ctx, cfg, false, func(options instance.Options) (*instance.Guard, error) {
+		captured = options
+		return nil, nil
+	})
+
+	require.NoError(t, err)
+	assert.Same(t, ctx, captured.Context)
+}
+
 func TestAcquireConfiguredInstanceGuardUsesWatchModeConfig(t *testing.T) {
 	cfg := &config.Config{
 		ConfigDir: "/repo",
@@ -57,7 +91,7 @@ func TestAcquireConfiguredInstanceGuardUsesWatchModeConfig(t *testing.T) {
 	cfg.Shared.Instance.ReplaceTimeout.Set = true
 
 	var captured instance.Options
-	guard, err := acquireConfiguredInstanceGuard(cfg, false, func(options instance.Options) (*instance.Guard, error) {
+	guard, err := acquireConfiguredInstanceGuard(context.Background(), cfg, false, func(options instance.Options) (*instance.Guard, error) {
 		captured = options
 		return nil, nil
 	})

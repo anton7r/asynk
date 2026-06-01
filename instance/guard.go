@@ -45,6 +45,7 @@ const (
 )
 
 type Options struct {
+	Context        context.Context
 	ConfigDir      string
 	Policy         Policy
 	ReplaceTimeout time.Duration
@@ -65,6 +66,7 @@ type Guard struct {
 	token           string
 	pid             int
 	configDir       string
+	acquiredAt      time.Time
 	shutdownModTime time.Time
 }
 
@@ -87,6 +89,9 @@ func Acquire(options Options) (*Guard, error) {
 		return nil, nil
 	}
 
+	if options.Context == nil {
+		options.Context = context.Background()
+	}
 	if options.Probe == nil {
 		options.Probe = OSProcessProbe{}
 	}
@@ -123,6 +128,10 @@ func Acquire(options Options) (*Guard, error) {
 	}
 
 	for {
+		if err := options.Context.Err(); err != nil {
+			return nil, err
+		}
+
 		acquired, err := guard.tryCreate(options.Now, options.Probe)
 		if err != nil {
 			return nil, err
@@ -134,7 +143,7 @@ func Acquire(options Options) (*Guard, error) {
 		owner, ownerData, err := readOwnerData(guard.ownerPath)
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) || isMalformedOwner(err) {
-				if _, waitOwnerData, waitErr := waitForOwnerData(guard.ownerPath, ownerCreateTimeout); waitErr == nil {
+				if _, waitOwnerData, waitErr := waitForOwnerData(options.Context, guard.ownerPath, ownerCreateTimeout); waitErr == nil {
 					continue
 				} else if !errors.Is(waitErr, os.ErrNotExist) && !isMalformedOwner(waitErr) {
 					return nil, fmt.Errorf("reading instance owner: %w", waitErr)
@@ -174,13 +183,16 @@ func Acquire(options Options) (*Guard, error) {
 			if options.beforeRequestShutdown != nil {
 				options.beforeRequestShutdown()
 			}
+			if err := options.Context.Err(); err != nil {
+				return nil, err
+			}
 			if err := requestShutdown(owner, options.PID, options.Now()); err != nil {
 				if errors.Is(err, os.ErrNotExist) {
 					continue
 				}
 				return nil, err
 			}
-			if err := waitForReleaseOrOwnerChange(lockDir, guard.ownerPath, owner, options.ReplaceTimeout); err != nil {
+			if err := waitForReleaseOrOwnerChange(options.Context, lockDir, guard.ownerPath, owner, options.ReplaceTimeout); err != nil {
 				return nil, err
 			}
 		default:
@@ -237,7 +249,9 @@ func (g *Guard) StartShutdownMonitor(ctx context.Context, onShutdown func()) {
 		return
 	}
 	if info, err := os.Stat(g.shutdownPath); err == nil {
-		g.shutdownModTime = info.ModTime()
+		if g.acquiredAt.IsZero() || !info.ModTime().After(g.acquiredAt) {
+			g.shutdownModTime = info.ModTime()
+		}
 	}
 
 	go func() {
@@ -297,7 +311,8 @@ func (g *Guard) tryCreate(now func() time.Time, probe ProcessProbe) (bool, error
 		return false, fmt.Errorf("creating instance lock: %w", err)
 	}
 
-	startTime := now().UTC()
+	acquiredAt := now().UTC()
+	startTime := acquiredAt
 	if processStart, ok := probe.CurrentStartTime(g.pid); ok {
 		startTime = processStart.UTC()
 	}
@@ -314,6 +329,7 @@ func (g *Guard) tryCreate(now func() time.Time, probe ProcessProbe) (bool, error
 		return false, fmt.Errorf("writing instance owner: %w", err)
 	}
 
+	g.acquiredAt = acquiredAt
 	return true, nil
 }
 
@@ -351,9 +367,12 @@ func readOwnerData(path string) (Owner, []byte, error) {
 	return owner, data, nil
 }
 
-func waitForOwnerData(path string, timeout time.Duration) (Owner, []byte, error) {
+func waitForOwnerData(ctx context.Context, path string, timeout time.Duration) (Owner, []byte, error) {
 	deadline := time.Now().Add(timeout)
 	for {
+		if err := ctx.Err(); err != nil {
+			return Owner{}, nil, err
+		}
 		owner, data, err := readOwnerData(path)
 		if err == nil || (!errors.Is(err, os.ErrNotExist) && !isMalformedOwner(err)) {
 			return owner, data, err
@@ -361,7 +380,9 @@ func waitForOwnerData(path string, timeout time.Duration) (Owner, []byte, error)
 		if time.Now().After(deadline) {
 			return owner, data, err
 		}
-		time.Sleep(10 * time.Millisecond)
+		if err := sleepContext(ctx, 10*time.Millisecond); err != nil {
+			return Owner{}, nil, err
+		}
 	}
 }
 
@@ -394,9 +415,12 @@ func requestShutdown(owner Owner, requestedBy int, requestedAt time.Time) error 
 	return nil
 }
 
-func waitForReleaseOrOwnerChange(lockDir, ownerPath string, expectedOwner Owner, timeout time.Duration) error {
+func waitForReleaseOrOwnerChange(ctx context.Context, lockDir, ownerPath string, expectedOwner Owner, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if _, err := os.Stat(lockDir); errors.Is(err, os.ErrNotExist) {
 			return nil
 		} else if err != nil {
@@ -414,7 +438,21 @@ func waitForReleaseOrOwnerChange(lockDir, ownerPath string, expectedOwner Owner,
 		if time.Now().After(deadline) {
 			return fmt.Errorf("%w: previous instance did not exit within %s", ErrAlreadyRunning, timeout)
 		}
-		time.Sleep(pollInterval)
+		if err := sleepContext(ctx, pollInterval); err != nil {
+			return err
+		}
+	}
+}
+
+func sleepContext(ctx context.Context, duration time.Duration) error {
+	timer := time.NewTimer(duration)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
 	}
 }
 

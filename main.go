@@ -44,7 +44,7 @@ func main() {
 	ctx, cancel := context.WithCancel(signalCtx)
 	defer cancel()
 
-	guard, err := acquireConfiguredInstanceGuard(configuration, *runOnce, instance.Acquire)
+	guard, err := acquireConfiguredInstanceGuard(ctx, configuration, *runOnce, instance.Acquire)
 	if err != nil {
 		fmt.Printf("Error acquiring instance guard: %v\n", err)
 		log.Error("Error acquiring instance guard", zap.Error(err))
@@ -55,6 +55,10 @@ func main() {
 			log.Error("Error releasing instance guard", zap.Error(err))
 		}
 	}()
+
+	if !*runOnce {
+		guard.StartShutdownMonitor(ctx, cancel)
+	}
 
 	// Create a new application state
 	platform := util.NewPlatform()
@@ -68,9 +72,9 @@ func main() {
 	} else {
 		log.Info("Press Ctrl+C to stop Asynk.")
 
-		guard.StartShutdownMonitor(ctx, cancel)
-
-		go runner.Start()
+		if ctx.Err() == nil {
+			go runner.Start()
+		}
 
 		<-ctx.Done()
 		log.Info("Shutdown signal received. Stopping all running tasks...")
@@ -81,6 +85,7 @@ func main() {
 }
 
 func acquireConfiguredInstanceGuard(
+	ctx context.Context,
 	configuration *config.Config,
 	runOnce bool,
 	acquire func(instance.Options) (*instance.Guard, error),
@@ -93,6 +98,7 @@ func acquireConfiguredInstanceGuard(
 	}
 
 	return acquire(instance.Options{
+		Context:        ctx,
 		ConfigDir:      configuration.ConfigDir,
 		Policy:         instance.Policy(configuration.EffectiveInstancePolicy()),
 		ReplaceTimeout: configuration.EffectiveInstanceReplaceTimeout(),
