@@ -491,6 +491,69 @@ func TestAcquireReplaceRetriesWhenOwnerExitsBeforeShutdownRequest(t *testing.T) 
 	assert.Equal(t, "new-token", owner.Token)
 }
 
+func TestAcquireReplaceRetriesWhenOwnerChangesBeforeShutdownRequest(t *testing.T) {
+	root := t.TempDir()
+	configDir := filepath.Join(root, "repo")
+	lockDir := createOwner(t, root, configDir, Owner{
+		PID:       1401,
+		StartTime: time.Now().UTC(),
+		Token:     "old-token",
+	})
+	ownerPath := filepath.Join(lockDir, ownerFileName)
+	shutdownPath := filepath.Join(lockDir, shutdownRequestFileName)
+
+	replaced := false
+	released := make(chan struct{})
+	go func() {
+		defer close(released)
+		for {
+			data, err := os.ReadFile(shutdownPath)
+			if err == nil {
+				var request shutdownRequest
+				if json.Unmarshal(data, &request) == nil && request.Token == "current-token" {
+					_ = os.RemoveAll(lockDir)
+					return
+				}
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}()
+
+	guard, err := Acquire(Options{
+		ConfigDir:      configDir,
+		Policy:         PolicyReplace,
+		ReplaceTimeout: time.Second,
+		RootDir:        root,
+		PID:            1403,
+		Token:          "new-token",
+		Probe: fakeProbe{matches: map[int]bool{
+			1401: true,
+			1402: true,
+		}},
+		beforeRequestShutdown: func() {
+			if replaced {
+				return
+			}
+			replaced = true
+			require.NoError(t, writeJSON(ownerPath, Owner{
+				PID:                 1402,
+				StartTime:           time.Now().UTC(),
+				ConfigDir:           filepath.Clean(configDir),
+				Token:               "current-token",
+				ShutdownRequestPath: shutdownPath,
+			}))
+		},
+	})
+
+	require.NoError(t, err)
+	require.NotNil(t, guard)
+	<-released
+
+	owner := readOwnerFile(t, guard.ownerPath)
+	assert.Equal(t, 1403, owner.PID)
+	assert.Equal(t, "new-token", owner.Token)
+}
+
 func TestShutdownRequestedRetriesMalformedRequestWithSameModTime(t *testing.T) {
 	root := t.TempDir()
 	shutdownPath := filepath.Join(root, shutdownRequestFileName)
