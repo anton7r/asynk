@@ -722,6 +722,36 @@ func TestStartShutdownMonitorHandlesRequestsWrittenAfterAcquisitionBeforeMonitor
 	}
 }
 
+func TestStartShutdownMonitorHandlesEqualMTimeRequestWrittenAfterAcquisition(t *testing.T) {
+	root := t.TempDir()
+	shutdownPath := filepath.Join(root, shutdownRequestFileName)
+	acquiredAt := time.Date(2026, 6, 1, 10, 0, 0, 0, time.UTC)
+	guard := &Guard{
+		shutdownPath: shutdownPath,
+		token:        "owner-token",
+		acquiredAt:   acquiredAt,
+	}
+	require.NoError(t, writeJSON(shutdownPath, shutdownRequest{
+		Token:       "owner-token",
+		RequestedBy: 1503,
+		RequestedAt: acquiredAt.Add(time.Millisecond),
+	}))
+	require.NoError(t, os.Chtimes(shutdownPath, acquiredAt, acquiredAt))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	called := make(chan struct{}, 1)
+	guard.StartShutdownMonitor(ctx, func() {
+		called <- struct{}{}
+	})
+
+	select {
+	case <-called:
+	case <-time.After(pollInterval + 50*time.Millisecond):
+		t.Fatal("shutdown monitor should handle equal-mtime requests written after guard acquisition")
+	}
+}
+
 func createOwner(t *testing.T, root, configDir string, owner Owner) string {
 	t.Helper()
 
