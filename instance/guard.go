@@ -180,7 +180,7 @@ func Acquire(options Options) (*Guard, error) {
 				}
 				return nil, err
 			}
-			if err := waitForRelease(lockDir, options.ReplaceTimeout); err != nil {
+			if err := waitForReleaseOrOwnerChange(lockDir, guard.ownerPath, owner, options.ReplaceTimeout); err != nil {
 				return nil, err
 			}
 		default:
@@ -391,17 +391,32 @@ func requestShutdown(owner Owner, requestedBy int, requestedAt time.Time) error 
 	return nil
 }
 
-func waitForRelease(lockDir string, timeout time.Duration) error {
+func waitForReleaseOrOwnerChange(lockDir, ownerPath string, expectedOwner Owner, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for {
 		if _, err := os.Stat(lockDir); errors.Is(err, os.ErrNotExist) {
 			return nil
+		} else if err != nil {
+			return fmt.Errorf("checking instance lock: %w", err)
 		}
+
+		owner, _, err := readOwnerData(ownerPath)
+		if err == nil && ownerChanged(owner, expectedOwner) {
+			return nil
+		}
+		if err != nil && !errors.Is(err, os.ErrNotExist) && !isMalformedOwner(err) {
+			return fmt.Errorf("reading instance owner while waiting for replacement: %w", err)
+		}
+
 		if time.Now().After(deadline) {
 			return fmt.Errorf("%w: previous instance did not exit within %s", ErrAlreadyRunning, timeout)
 		}
 		time.Sleep(pollInterval)
 	}
+}
+
+func ownerChanged(owner, expectedOwner Owner) bool {
+	return owner.PID != expectedOwner.PID || owner.Token != expectedOwner.Token
 }
 
 func alreadyRunningError(owner Owner) error {

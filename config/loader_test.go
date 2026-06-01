@@ -141,9 +141,29 @@ tasks:
 `)
 	cfg, err := LoadFromBytes(yml)
 
-	assert.Error(t, err)
+	if assert.Error(t, err) {
+		assert.Contains(t, err.Error(), "replace-timeout")
+	}
 	assert.Nil(t, cfg)
-	assert.Contains(t, err.Error(), "replace-timeout")
+}
+
+func TestLoadFromBytes_InstanceConfigRejectsZeroReplaceTimeout(t *testing.T) {
+	yml := []byte(`
+shared:
+  instance:
+    policy: replace
+    replace-timeout: 0s
+tasks:
+  app:
+    type: continuous
+    run: "echo hello"
+`)
+	cfg, err := LoadFromBytes(yml)
+
+	if assert.Error(t, err) {
+		assert.Contains(t, err.Error(), "replace-timeout")
+	}
+	assert.Nil(t, cfg)
 }
 
 func TestLoadFromBytes_FSDebounce(t *testing.T) {
