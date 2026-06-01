@@ -39,7 +39,7 @@ func main() {
 	}
 	log := createLogger(logLevel)
 
-	signalCtx, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	signalCtx, stopSignals := signalContextForMode(*runOnce)
 	defer stopSignals()
 	ctx, cancel := context.WithCancel(signalCtx)
 	defer cancel()
@@ -103,4 +103,11 @@ func acquireConfiguredInstanceGuard(
 		Policy:         instance.Policy(configuration.EffectiveInstancePolicy()),
 		ReplaceTimeout: configuration.EffectiveInstanceReplaceTimeout(),
 	})
+}
+
+func signalContextForMode(runOnce bool) (context.Context, func()) {
+	if runOnce {
+		return context.Background(), func() {}
+	}
+	return signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 }

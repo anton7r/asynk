@@ -11,18 +11,11 @@ import (
 )
 
 func platformProcessStartTime(pid int) (time.Time, bool) {
-	statData, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
-	if err != nil {
+	fields, ok := linuxProcessStatFields(pid)
+	if !ok {
 		return time.Time{}, false
 	}
 
-	stat := string(statData)
-	endCommand := strings.LastIndex(stat, ")")
-	if endCommand == -1 || endCommand+2 >= len(stat) {
-		return time.Time{}, false
-	}
-
-	fields := strings.Fields(stat[endCommand+2:])
 	if len(fields) < 20 {
 		return time.Time{}, false
 	}
@@ -39,6 +32,30 @@ func platformProcessStartTime(pid int) (time.Time, bool) {
 
 	const clockTicksPerSecond = 100
 	return bootTime.Add(time.Duration(startTicks) * time.Second / clockTicksPerSecond), true
+}
+
+func platformProcessZombie(pid int) (bool, bool) {
+	fields, ok := linuxProcessStatFields(pid)
+	if !ok || len(fields) == 0 {
+		return false, false
+	}
+
+	return fields[0] == "Z", true
+}
+
+func linuxProcessStatFields(pid int) ([]string, bool) {
+	statData, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return nil, false
+	}
+
+	stat := string(statData)
+	endCommand := strings.LastIndex(stat, ")")
+	if endCommand == -1 || endCommand+2 >= len(stat) {
+		return nil, false
+	}
+
+	return strings.Fields(stat[endCommand+2:]), true
 }
 
 func linuxBootTime() (time.Time, bool) {

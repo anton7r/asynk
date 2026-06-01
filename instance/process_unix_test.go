@@ -31,9 +31,11 @@ func TestOSProcessProbeDoesNotMatchWhenStartTimeCannotBeVerified(t *testing.T) {
 func TestOSProcessProbeMatchesWhenStartTimeMatches(t *testing.T) {
 	originalAlive := osProcessAlive
 	originalStart := osProcessStartTime
+	originalZombie := osProcessZombie
 	defer func() {
 		osProcessAlive = originalAlive
 		osProcessStartTime = originalStart
+		osProcessZombie = originalZombie
 	}()
 
 	start := time.Now().UTC()
@@ -43,6 +45,33 @@ func TestOSProcessProbeMatchesWhenStartTimeMatches(t *testing.T) {
 	osProcessStartTime = func(pid int) (time.Time, bool) {
 		return start, true
 	}
+	osProcessZombie = func(pid int) (bool, bool) {
+		return false, true
+	}
 
 	assert.True(t, OSProcessProbe{}.Matches(1202, start))
+}
+
+func TestOSProcessProbeTreatsZombieOwnerAsDead(t *testing.T) {
+	originalAlive := osProcessAlive
+	originalStart := osProcessStartTime
+	originalZombie := osProcessZombie
+	defer func() {
+		osProcessAlive = originalAlive
+		osProcessStartTime = originalStart
+		osProcessZombie = originalZombie
+	}()
+
+	start := time.Now().UTC()
+	osProcessAlive = func(pid int) error {
+		return nil
+	}
+	osProcessStartTime = func(pid int) (time.Time, bool) {
+		return start, true
+	}
+	osProcessZombie = func(pid int) (bool, bool) {
+		return true, true
+	}
+
+	assert.Equal(t, OwnerStatusDead, OSProcessProbe{}.Status(1203, start))
 }
