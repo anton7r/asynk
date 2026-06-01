@@ -11,7 +11,7 @@ import (
 
 var envNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
-const minimumInstanceReplaceTimeout = 100 * time.Millisecond
+const minimumInstanceReplaceTimeout = 5 * time.Second
 
 type validator struct {
 	config    *Config

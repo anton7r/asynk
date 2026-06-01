@@ -86,7 +86,20 @@ tasks:
 
 	assert.NoError(t, err)
 	assert.Equal(t, InstancePolicy_Allow, cfg.EffectiveInstancePolicy())
-	assert.Equal(t, 5*time.Second, cfg.EffectiveInstanceReplaceTimeout())
+	assert.Equal(t, 6*time.Second, cfg.EffectiveInstanceReplaceTimeout())
+}
+
+func TestLoadFromBytes_InstanceDefaultReplaceTimeoutExceedsTaskShutdownGrace(t *testing.T) {
+	yml := []byte(`
+tasks:
+  app:
+    type: continuous
+    run: "echo hello"
+`)
+	cfg, err := LoadFromBytes(yml)
+
+	assert.NoError(t, err)
+	assert.Greater(t, cfg.EffectiveInstanceReplaceTimeout(), 5*time.Second)
 }
 
 func TestLoadFromBytes_InstanceConfigValidPolicies(t *testing.T) {
@@ -96,7 +109,7 @@ func TestLoadFromBytes_InstanceConfigValidPolicies(t *testing.T) {
 shared:
   instance:
     policy: ` + string(policy) + `
-    replace-timeout: 750ms
+    replace-timeout: 6s
 tasks:
   app:
     type: continuous
@@ -106,7 +119,7 @@ tasks:
 
 			assert.NoError(t, err)
 			assert.Equal(t, policy, cfg.EffectiveInstancePolicy())
-			assert.Equal(t, 750*time.Millisecond, cfg.EffectiveInstanceReplaceTimeout())
+			assert.Equal(t, 6*time.Second, cfg.EffectiveInstanceReplaceTimeout())
 		})
 	}
 }
@@ -181,7 +194,7 @@ tasks:
 
 	if assert.Error(t, err) {
 		assert.Contains(t, err.Error(), "replace-timeout")
-		assert.Contains(t, err.Error(), "100ms")
+		assert.Contains(t, err.Error(), "5s")
 	}
 	assert.Nil(t, cfg)
 }
@@ -201,7 +214,27 @@ tasks:
 
 	if assert.Error(t, err) {
 		assert.Contains(t, err.Error(), "replace-timeout")
-		assert.Contains(t, err.Error(), "100ms")
+		assert.Contains(t, err.Error(), "5s")
+	}
+	assert.Nil(t, cfg)
+}
+
+func TestLoadFromBytes_InstanceConfigRejectsReplaceTimeoutAtTaskShutdownGrace(t *testing.T) {
+	yml := []byte(`
+shared:
+  instance:
+    policy: replace
+    replace-timeout: 5s
+tasks:
+  app:
+    type: continuous
+    run: "echo hello"
+`)
+	cfg, err := LoadFromBytes(yml)
+
+	if assert.Error(t, err) {
+		assert.Contains(t, err.Error(), "replace-timeout")
+		assert.Contains(t, err.Error(), "5s")
 	}
 	assert.Nil(t, cfg)
 }
