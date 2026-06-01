@@ -15,6 +15,9 @@ import (
 func TestAcquireUsesSameLockForDifferentPathCasingOnWindows(t *testing.T) {
 	root := t.TempDir()
 	configDir := t.TempDir()
+	if insensitive, ok := detectPathCaseInsensitive(configDir); !ok || !insensitive {
+		t.Skip("test requires a case-insensitive temporary directory")
+	}
 	upperConfigDir := strings.ToUpper(configDir)
 	lowerConfigDir := strings.ToLower(configDir)
 
@@ -45,6 +48,7 @@ func TestAcquireUsesSameLockForDifferentPathCasingOnWindows(t *testing.T) {
 
 func TestLockDirNormalizesConfigDirCasingOnWindows(t *testing.T) {
 	root := t.TempDir()
+	stubPathCaseInsensitive(t, true, true)
 
 	upperLockDir, err := lockDir(root, `C:\Repo\Project`)
 	require.NoError(t, err)

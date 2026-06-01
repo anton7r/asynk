@@ -224,6 +224,24 @@ func TestAcquireCanonicalizesSymlinkedConfigDirectory(t *testing.T) {
 	assert.True(t, errors.Is(err, ErrAlreadyRunning))
 }
 
+func TestLockKeyConfigDirPreservesDistinctCaseSensitivePaths(t *testing.T) {
+	stubPathCaseInsensitive(t, false, true)
+
+	appDir := filepath.Join("work", "App")
+	lowerDir := filepath.Join("work", "app")
+
+	assert.NotEqual(t, lockKeyConfigDir(appDir), lockKeyConfigDir(lowerDir))
+}
+
+func TestLockKeyConfigDirFoldsCaseForCaseInsensitivePaths(t *testing.T) {
+	stubPathCaseInsensitive(t, true, true)
+
+	appDir := filepath.Join("work", "App")
+	lowerDir := filepath.Join("work", "app")
+
+	assert.Equal(t, lockKeyConfigDir(appDir), lockKeyConfigDir(lowerDir))
+}
+
 func TestAcquireTreatsReusedPIDWithDifferentStartTimeAsStale(t *testing.T) {
 	root := t.TempDir()
 	configDir := filepath.Join(root, "repo")
@@ -732,4 +750,16 @@ func readOwnerFile(t *testing.T, path string) Owner {
 	var owner Owner
 	require.NoError(t, json.Unmarshal(data, &owner))
 	return owner
+}
+
+func stubPathCaseInsensitive(t *testing.T, insensitive, ok bool) {
+	t.Helper()
+
+	original := pathCaseInsensitive
+	pathCaseInsensitive = func(string) (bool, bool) {
+		return insensitive, ok
+	}
+	t.Cleanup(func() {
+		pathCaseInsensitive = original
+	})
 }

@@ -4,7 +4,9 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 
 	"github.com/anton7r/asynk/config"
@@ -39,12 +41,18 @@ func main() {
 	}
 	log := createLogger(logLevel)
 
-	signalCtx, stopSignals := signalContextForMode(*runOnce)
-	defer stopSignals()
-	ctx, cancel := context.WithCancel(signalCtx)
-	defer cancel()
+	acquireCtx, stopAcquireSignals := signalContextForMode(*runOnce)
+	acquireSignalsStopped := false
+	stopAcquireSignalsNow := func() {
+		if acquireSignalsStopped {
+			return
+		}
+		stopAcquireSignals()
+		acquireSignalsStopped = true
+	}
+	defer stopAcquireSignalsNow()
 
-	guard, err := acquireConfiguredInstanceGuard(ctx, configuration, *runOnce, instance.Acquire)
+	guard, err := acquireConfiguredInstanceGuard(acquireCtx, configuration, *runOnce, instance.Acquire)
 	if err != nil {
 		fmt.Printf("Error acquiring instance guard: %v\n", err)
 		log.Error("Error acquiring instance guard", zap.Error(err))
@@ -56,8 +64,14 @@ func main() {
 		}
 	}()
 
+	watchCtx, cancelWatch := context.WithCancel(context.Background())
+	defer cancelWatch()
 	if !*runOnce {
-		guard.StartShutdownMonitor(ctx, cancel)
+		guard.StartShutdownMonitor(watchCtx, cancelWatch)
+		stopAcquireSignalsNow()
+		if acquireCtx.Err() != nil {
+			cancelWatch()
+		}
 	}
 
 	// Create a new application state
@@ -70,13 +84,17 @@ func main() {
 		runner.WaitForCompletion()
 		log.Info("All tasks completed. Exiting.")
 	} else {
+		runSignalCtx, stopRunSignals := signalContextForMode(false)
+		defer stopRunSignals()
+		cancelWhenDone(runSignalCtx, watchCtx, cancelWatch)
+
 		log.Info("Press Ctrl+C to stop Asynk.")
 
-		if ctx.Err() == nil {
+		if watchCtx.Err() == nil {
 			go runner.Start()
 		}
 
-		<-ctx.Done()
+		<-watchCtx.Done()
 		log.Info("Shutdown signal received. Stopping all running tasks...")
 		runner.Stop()
 
@@ -109,5 +127,40 @@ func signalContextForMode(runOnce bool) (context.Context, func()) {
 	if runOnce {
 		return context.Background(), func() {}
 	}
-	return signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	signals := make(chan os.Signal, 1)
+	stopped := make(chan struct{})
+	var stopOnce sync.Once
+
+	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		select {
+		case <-signals:
+			cancel()
+		case <-stopped:
+		}
+	}()
+
+	return ctx, func() {
+		stopOnce.Do(func() {
+			signal.Stop(signals)
+			select {
+			case <-signals:
+				cancel()
+			default:
+			}
+			close(stopped)
+		})
+	}
+}
+
+func cancelWhenDone(ctx, stopCtx context.Context, cancel context.CancelFunc) {
+	go func() {
+		select {
+		case <-ctx.Done():
+			cancel()
+		case <-stopCtx.Done():
+		}
+	}()
 }
