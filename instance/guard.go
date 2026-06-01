@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"time"
 )
 
@@ -342,8 +344,15 @@ func lockDir(rootDir, configDir string) (string, error) {
 		rootDir = filepath.Join(cacheDir, "asynk", "instances")
 	}
 
-	sum := sha256.Sum256([]byte(configDir))
+	sum := sha256.Sum256([]byte(lockKeyConfigDir(configDir)))
 	return filepath.Join(rootDir, hex.EncodeToString(sum[:])), nil
+}
+
+func lockKeyConfigDir(configDir string) string {
+	if runtime.GOOS == "windows" || runtime.GOOS == "darwin" {
+		return strings.ToLower(configDir)
+	}
+	return configDir
 }
 
 func readOwner(path string) (Owner, error) {

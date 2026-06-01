@@ -12,6 +12,7 @@ type OSProcessProbe struct{}
 var (
 	osProcessAlive     = func(pid int) error { return syscall.Kill(pid, syscall.Signal(0)) }
 	osProcessStartTime = platformProcessStartTime
+	osProcessZombie    = platformProcessZombie
 )
 
 func (probe OSProcessProbe) Status(pid int, startTime time.Time) OwnerStatus {
@@ -21,6 +22,10 @@ func (probe OSProcessProbe) Status(pid int, startTime time.Time) OwnerStatus {
 
 	err := osProcessAlive(pid)
 	if err != nil && err != syscall.EPERM {
+		return OwnerStatusDead
+	}
+
+	if zombie, ok := osProcessZombie(pid); ok && zombie {
 		return OwnerStatusDead
 	}
 

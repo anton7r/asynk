@@ -37,12 +37,21 @@ func TestMainInstallsSignalContextBeforeInstanceAcquisition(t *testing.T) {
 	require.NoError(t, err)
 
 	text := string(source)
-	signalIndex := strings.Index(text, "signal.NotifyContext")
+	signalIndex := strings.Index(text, "signalContextForMode")
 	acquireIndex := strings.Index(text, "acquireConfiguredInstanceGuard")
 
 	require.NotEqual(t, -1, signalIndex)
 	require.NotEqual(t, -1, acquireIndex)
 	assert.Less(t, signalIndex, acquireIndex)
+}
+
+func TestSignalContextForRunOnceDoesNotInstallCancelableContext(t *testing.T) {
+	ctx, stop := signalContextForMode(true)
+	defer stop()
+
+	stop()
+
+	assert.NoError(t, ctx.Err())
 }
 
 func TestMainStartsShutdownMonitorBeforeRunnerInitialization(t *testing.T) {
