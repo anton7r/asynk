@@ -5,10 +5,13 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 	"unicode"
 )
 
 var envNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+const minimumInstanceReplaceTimeout = 100 * time.Millisecond
 
 type validator struct {
 	config    *Config
@@ -196,6 +199,10 @@ func (v *validator) validateInstanceConfig() error {
 	if v.config.Shared.Instance.ReplaceTimeout.IsSet() &&
 		v.config.Shared.Instance.ReplaceTimeout.Duration <= 0 {
 		return fmt.Errorf("invalid shared instance replace-timeout configuration, duration must be positive")
+	}
+	if v.config.Shared.Instance.ReplaceTimeout.IsSet() &&
+		v.config.Shared.Instance.ReplaceTimeout.Duration < minimumInstanceReplaceTimeout {
+		return fmt.Errorf("invalid shared instance replace-timeout configuration, duration must be at least %s", minimumInstanceReplaceTimeout)
 	}
 
 	return nil
