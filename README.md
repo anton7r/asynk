@@ -70,7 +70,7 @@ shared:
     # uses this same config directory. Defaults to policy: allow.
     instance:
       policy: block
-      replace-timeout: 5s
+      replace-timeout: 6s
     # Excludes directories globally for all the configurations
     # For example if you want to ignore node_modules folder.
     # Supports glob patterns
@@ -142,7 +142,7 @@ tasks:
 shared:
   instance:
     policy: block # allow | block | replace
-    replace-timeout: 5s
+    replace-timeout: 6s
 ```
 
 `allow` keeps the default behavior. `block` exits if another live asynk process owns the same resolved config directory. `replace` asks the existing process to shut down gracefully and waits up to `replace-timeout`; if it does not exit in time, the new process exits without force-killing it.

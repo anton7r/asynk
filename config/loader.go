@@ -69,7 +69,7 @@ const (
 	InstancePolicy_Replace InstancePolicy = "replace"
 )
 
-const DefaultInstanceReplaceTimeout = 5 * time.Second
+const DefaultInstanceReplaceTimeout = 6 * time.Second
 
 type RebuildSuppressionConfig struct {
 	Enabled *bool                  `yaml:"enabled"`
