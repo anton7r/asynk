@@ -99,14 +99,13 @@ tasks:
       path: /health
       interval: 1ms
       timeout: 200ms
-      triggers:
-        - task: generate
   generate:
     type: build
     auto-start: false
     run: "echo generate"
     consumes:
       - task: backend
+        when: ready
         env:
           API_BASE_URL: url
 `, readinessChecker, factory)
@@ -126,30 +125,31 @@ tasks:
 	assert.Contains(t, readinessChecker.URLs(), "http://127.0.0.1:3000/health")
 }
 
-func TestReadinessTriggerRunsOnlyForMatchingRestartFiles(t *testing.T) {
-	trigger := config.ReadinessTriggerConfig{
-		Task:    "generate",
+func TestReadinessConsumerRunsOnlyForMatchingRestartFiles(t *testing.T) {
+	consume := config.ConsumeConfig{
+		Task:    "backend",
+		When:    config.ConsumeWhen_Ready,
 		Include: configutilGlobArray(t, "internal/routes/**", "internal/models/**"),
 		Exclude: configutilGlobArray(t, "**/*_test.go"),
 	}
 
-	assert.True(t, readinessTriggerShouldRun(
-		trigger,
+	assert.True(t, readinessConsumerShouldRun(
+		consume,
 		TaskStartCauseFile,
 		[]string{"internal/routes/users.go"},
 	))
-	assert.False(t, readinessTriggerShouldRun(
-		trigger,
+	assert.False(t, readinessConsumerShouldRun(
+		consume,
 		TaskStartCauseFile,
 		[]string{"internal/routes/users_test.go"},
 	))
-	assert.False(t, readinessTriggerShouldRun(
-		trigger,
+	assert.False(t, readinessConsumerShouldRun(
+		consume,
 		TaskStartCauseFile,
 		[]string{"README.md"},
 	))
-	assert.True(t, readinessTriggerShouldRun(
-		trigger,
+	assert.True(t, readinessConsumerShouldRun(
+		consume,
 		TaskStartCauseInitial,
 		nil,
 	))
@@ -169,14 +169,17 @@ tasks:
       path: /health
       interval: 1ms
       timeout: 200ms
-      triggers:
-        - task: generate
-          include:
-            - "internal/routes/**"
   generate:
     type: build
     auto-start: false
     run: "echo generate"
+    consumes:
+      - task: backend
+        when: ready
+        include:
+          - "internal/routes/**"
+        env:
+          API_BASE_URL: url
 `, readinessChecker, factory)
 
 	_, _, _, err := runner.prepareTaskForStart(runner.Config.Tasks["backend"])
@@ -207,14 +210,17 @@ tasks:
       path: /health
       interval: 1ms
       timeout: 200ms
-      triggers:
-        - task: generate
-          include:
-            - "internal/routes/**"
   generate:
     type: build
     auto-start: false
     run: "echo generate"
+    consumes:
+      - task: backend
+        when: ready
+        include:
+          - "internal/routes/**"
+        env:
+          API_BASE_URL: url
 `, readinessChecker, factory)
 
 	_, _, _, err := runner.prepareTaskForStart(runner.Config.Tasks["backend"])
@@ -238,20 +244,24 @@ tasks:
   backend:
     type: continuous
     run: "go run ."
+    port:
+      preferred: 3000
     readiness:
       url: http://127.0.0.1:3000/health
-      triggers:
-        - task: generate
   generate:
     type: build
     auto-start: false
     run: "echo generate"
+    consumes:
+      - task: backend
+        when: ready
+        env:
+          API_BASE_URL: url
 `, &sequenceReadinessChecker{}, factory)
 
 	runner.readinessGeneration["backend"] = 2
-	runner.scheduleReadinessTriggers(
+	runner.scheduleReadinessConsumers(
 		"backend",
-		runner.Config.Tasks["backend"].Readiness,
 		TaskStartCauseInitial,
 		nil,
 		1,
@@ -274,12 +284,15 @@ tasks:
       path: /health
       interval: 1ms
       timeout: 5ms
-      triggers:
-        - task: generate
   generate:
     type: build
     auto-start: false
     run: "echo generate"
+    consumes:
+      - task: backend
+        when: ready
+        env:
+          API_BASE_URL: url
 `, readinessChecker, nil)
 
 	_, _, _, err := runner.prepareTaskForStart(runner.Config.Tasks["backend"])
@@ -300,6 +313,40 @@ tasks:
 	exports := runner.serviceExports["backend"]
 	runner.serviceExportMutex.Unlock()
 	assert.NotEmpty(t, exports, "readiness timeout should not clear provider exports or fail the backend")
+}
+
+func TestReadinessConsumerCannotStartBeforeProviderReady(t *testing.T) {
+	runner := testRunnerForReadiness(t, `
+tasks:
+  backend:
+    type: continuous
+    run: "go run . --port ${PORT}"
+    port:
+      preferred: 3000
+    readiness:
+      path: /health
+  generate:
+    type: build
+    auto-start: false
+    run: "echo generate"
+    consumes:
+      - task: backend
+        when: ready
+        env:
+          API_BASE_URL: url
+`, &sequenceReadinessChecker{}, nil)
+
+	_, _, _, err := runner.prepareTaskForStart(runner.Config.Tasks["backend"])
+	require.NoError(t, err)
+
+	assert.False(t, runner.canStartTask(&ScheduledTask{TaskConfiguration: runner.Config.Tasks["generate"]}))
+
+	runner.readinessMutex.Lock()
+	runner.readinessGeneration["backend"] = 1
+	runner.readinessReady["backend"] = 1
+	runner.readinessMutex.Unlock()
+
+	assert.True(t, runner.canStartTask(&ScheduledTask{TaskConfiguration: runner.Config.Tasks["generate"]}))
 }
 
 func configutilGlobArray(t *testing.T, patterns ...string) configutil.GlobArray {

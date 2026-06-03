@@ -315,6 +315,14 @@ func (v *validator) validateConsumes() error {
 				return fmt.Errorf("invalid task configuration, consume on-change is invalid for task '%s': %s", taskConfig.Identifier, consume.OnChange)
 			}
 
+			if consume.When != "" && consume.When != ConsumeWhen_Ready {
+				return fmt.Errorf("invalid task configuration, consume when is invalid for task '%s': %s", taskConfig.Identifier, consume.When)
+			}
+
+			if consume.When == ConsumeWhen_Ready && provider.Readiness == nil {
+				return fmt.Errorf("invalid task configuration, consumed task '%s' does not expose readiness: %s", consume.Task, taskConfig.Identifier)
+			}
+
 			if len(consume.Env) == 0 {
 				return fmt.Errorf("invalid task configuration, consume env mappings are missing: %s", taskConfig.Identifier)
 			}
@@ -360,21 +368,6 @@ func (v *validator) validateReadiness() error {
 
 		if readiness.Timeout.IsSet() && readiness.Timeout.Duration <= 0 {
 			return fmt.Errorf("invalid task configuration, readiness timeout must be positive: %s", taskConfig.Identifier)
-		}
-
-		for _, trigger := range readiness.Triggers {
-			if trigger.Task == "" {
-				return fmt.Errorf("invalid task configuration, readiness trigger task is missing: %s", taskConfig.Identifier)
-			}
-
-			target, exists := v.config.Tasks[trigger.Task]
-			if !exists {
-				return fmt.Errorf("invalid task configuration, readiness trigger task '%s' does not exist: %s", trigger.Task, taskConfig.Identifier)
-			}
-
-			if target.Type != TasKType_Build {
-				return fmt.Errorf("invalid task configuration, readiness trigger task '%s' must be a build task: %s", trigger.Task, taskConfig.Identifier)
-			}
 		}
 	}
 

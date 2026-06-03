@@ -84,7 +84,8 @@ func (runner *Runner) pollReadiness(
 				zap.String("taskId", taskID),
 				zap.String("url", healthURL),
 			)
-			runner.scheduleReadinessTriggers(taskID, readiness, startCause, matchedFiles, generation)
+			runner.markReadinessReady(taskID, generation)
+			runner.scheduleReadinessConsumers(taskID, startCause, matchedFiles, generation)
 			return
 		}
 
@@ -147,6 +148,7 @@ func (runner *Runner) registerReadinessPoller(taskID string, cancel context.Canc
 
 	runner.readinessGeneration[taskID]++
 	generation := runner.readinessGeneration[taskID]
+	runner.readinessReady[taskID] = 0
 	runner.readinessPollers[taskID] = cancel
 	return generation
 }
@@ -167,13 +169,13 @@ func (runner *Runner) cancelReadinessPoller(taskID string) {
 	defer runner.readinessMutex.Unlock()
 
 	cancel := runner.readinessPollers[taskID]
-	if cancel == nil {
-		return
+	if cancel != nil {
+		cancel()
+		delete(runner.readinessPollers, taskID)
 	}
 
-	cancel()
-	delete(runner.readinessPollers, taskID)
 	runner.readinessGeneration[taskID]++
+	runner.readinessReady[taskID] = 0
 }
 
 func (runner *Runner) cancelAllReadinessPollers() {
@@ -183,13 +185,34 @@ func (runner *Runner) cancelAllReadinessPollers() {
 	for taskID, cancel := range runner.readinessPollers {
 		cancel()
 		delete(runner.readinessPollers, taskID)
+	}
+	for taskID := range runner.readinessGeneration {
 		runner.readinessGeneration[taskID]++
+		runner.readinessReady[taskID] = 0
 	}
 }
 
-func (runner *Runner) scheduleReadinessTriggers(
+func (runner *Runner) markReadinessReady(taskID string, generation int64) {
+	runner.readinessMutex.Lock()
+	defer runner.readinessMutex.Unlock()
+
+	if runner.readinessGeneration[taskID] != generation {
+		return
+	}
+
+	runner.readinessReady[taskID] = generation
+}
+
+func (runner *Runner) providerReadinessReady(taskID string) bool {
+	runner.readinessMutex.Lock()
+	defer runner.readinessMutex.Unlock()
+
+	generation := runner.readinessGeneration[taskID]
+	return generation != 0 && runner.readinessReady[taskID] == generation
+}
+
+func (runner *Runner) scheduleReadinessConsumers(
 	providerTaskID string,
-	readiness *config.ReadinessConfig,
 	startCause TaskStartCause,
 	matchedFiles []string,
 	generation int64,
@@ -201,24 +224,26 @@ func (runner *Runner) scheduleReadinessTriggers(
 	runner.ScheduledTaskMutex.Lock()
 	defer runner.ScheduledTaskMutex.Unlock()
 
-	for _, trigger := range readiness.Triggers {
-		if !readinessTriggerShouldRun(trigger, startCause, matchedFiles) {
-			continue
-		}
+	for taskID, taskConfig := range runner.Config.Tasks {
+		for _, consume := range taskConfig.Consumes {
+			if consume.Task != providerTaskID || consume.When != config.ConsumeWhen_Ready {
+				continue
+			}
 
-		taskConfig := runner.Config.Tasks[trigger.Task]
-		if taskConfig == nil {
-			continue
-		}
+			if !readinessConsumerShouldRun(consume, startCause, matchedFiles) {
+				continue
+			}
 
-		runner.ScheduledTasks[trigger.Task] = &ScheduledTask{
-			TaskConfiguration: taskConfig,
-			StartCause:        TaskStartCauseReadiness,
+			runner.ScheduledTasks[taskID] = &ScheduledTask{
+				TaskConfiguration: taskConfig,
+				StartCause:        TaskStartCauseReadiness,
+			}
+			runner.log.Info("Scheduling readiness consumer",
+				zap.String("taskId", taskID),
+				zap.String("providerTaskId", providerTaskID),
+			)
+			break
 		}
-		runner.log.Info("Scheduling readiness trigger",
-			zap.String("taskId", trigger.Task),
-			zap.String("providerTaskId", providerTaskID),
-		)
 	}
 
 	go runner.startScheduledTasks()
@@ -231,8 +256,8 @@ func (runner *Runner) readinessGenerationCurrent(taskID string, generation int64
 	return runner.readinessGeneration[taskID] == generation
 }
 
-func readinessTriggerShouldRun(
-	trigger config.ReadinessTriggerConfig,
+func readinessConsumerShouldRun(
+	consume config.ConsumeConfig,
 	startCause TaskStartCause,
 	matchedFiles []string,
 ) bool {
@@ -246,11 +271,11 @@ func readinessTriggerShouldRun(
 
 	for _, file := range matchedFiles {
 		normalized := normalizePathSlashes(file)
-		if pathMatchesAny(trigger.Exclude, file, normalized) {
+		if pathMatchesAny(consume.Exclude, file, normalized) {
 			continue
 		}
 
-		if len(trigger.Include) == 0 || pathMatchesAny(trigger.Include, file, normalized) {
+		if len(consume.Include) == 0 || pathMatchesAny(consume.Include, file, normalized) {
 			return true
 		}
 	}

@@ -75,6 +75,19 @@ func (runner *Runner) consumesReady(taskConfig *config.TaskConfig) bool {
 		return false
 	}
 
+	for _, consume := range taskConfig.Consumes {
+		if consume.When != config.ConsumeWhen_Ready {
+			continue
+		}
+		if !runner.providerReadinessReady(consume.Task) {
+			runner.log.Debug("Task is waiting for consumed readiness",
+				zap.String("taskId", taskConfig.Identifier),
+				zap.String("providerTaskId", consume.Task),
+			)
+			return false
+		}
+	}
+
 	return true
 }
 
@@ -237,7 +250,9 @@ func (runner *Runner) scheduleExplicitRestartConsumersForProvider(providerTaskID
 
 	for taskID, taskConfig := range runner.Config.Tasks {
 		for _, consume := range taskConfig.Consumes {
-			if consume.Task != providerTaskID || consume.OnChange != config.ConsumeOnChange_Restart {
+			if consume.Task != providerTaskID ||
+				consume.When == config.ConsumeWhen_Ready ||
+				consume.OnChange != config.ConsumeOnChange_Restart {
 				continue
 			}
 
@@ -252,7 +267,9 @@ func (runner *Runner) scheduleExplicitRestartConsumersForProvider(providerTaskID
 func (runner *Runner) scheduleConsumersForProviderLocked(providerTaskID string) {
 	for taskID, taskConfig := range runner.Config.Tasks {
 		for _, consume := range taskConfig.Consumes {
-			if consume.Task != providerTaskID || !runner.shouldRestartOnProviderChange(consume) {
+			if consume.Task != providerTaskID ||
+				consume.When == config.ConsumeWhen_Ready ||
+				!runner.shouldRestartOnProviderChange(consume) {
 				continue
 			}
 
@@ -365,6 +382,8 @@ func cloneTaskConfig(taskConfig *config.TaskConfig) *config.TaskConfig {
 	clone.Consumes = make([]config.ConsumeConfig, len(taskConfig.Consumes))
 	for i, consume := range taskConfig.Consumes {
 		clone.Consumes[i] = consume
+		clone.Consumes[i].Include = append(configutil.GlobArray{}, consume.Include...)
+		clone.Consumes[i].Exclude = append(configutil.GlobArray{}, consume.Exclude...)
 		if consume.Env != nil {
 			clone.Consumes[i].Env = make(map[string]string, len(consume.Env))
 			for key, value := range consume.Env {
@@ -381,12 +400,6 @@ func cloneReadinessConfig(readiness *config.ReadinessConfig) *config.ReadinessCo
 	}
 
 	clone := *readiness
-	clone.Triggers = make([]config.ReadinessTriggerConfig, len(readiness.Triggers))
-	for i, trigger := range readiness.Triggers {
-		clone.Triggers[i] = trigger
-		clone.Triggers[i].Include = append(configutil.GlobArray{}, trigger.Include...)
-		clone.Triggers[i].Exclude = append(configutil.GlobArray{}, trigger.Exclude...)
-	}
 	return &clone
 }
 
