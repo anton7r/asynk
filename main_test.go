@@ -81,6 +81,7 @@ func TestMainRestoresSignalDefaultsBeforeRunnerInitialization(t *testing.T) {
 	require.NoError(t, err)
 
 	text := string(source)
+	text = strings.ReplaceAll(text, "\r\n", "\n")
 	stopAcquireSignalsIndex := strings.Index(text, "guard.StartShutdownMonitor(watchCtx, cancelWatch)\n\t\tstopAcquireSignalsNow()")
 	runnerIndex := strings.Index(text, "NewRunner")
 

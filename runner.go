@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"sync"
 	"time"
 
@@ -21,12 +22,25 @@ type SchedulableTask struct {
 	TaskConfiguration *config.TaskConfig
 	// The
 	ModificationTime time.Time
+	MatchedFiles     []string
+	StartCause       TaskStartCause
 }
 
 type ScheduledTask struct {
 	// Task configuration
 	TaskConfiguration *config.TaskConfig
+	MatchedFiles      []string
+	StartCause        TaskStartCause
 }
+
+type TaskStartCause string
+
+const (
+	TaskStartCauseInitial   TaskStartCause = "initial"
+	TaskStartCauseFile      TaskStartCause = "file"
+	TaskStartCauseProvider  TaskStartCause = "provider"
+	TaskStartCauseReadiness TaskStartCause = "readiness"
+)
 
 type Runner struct {
 	// Application configuration
@@ -41,49 +55,55 @@ type Runner struct {
 	// launches, closing the race window where filterRunningTasks could miss
 	// a task that was just started but not yet added to RunningTasks.
 	// Protected by RunningTaskMutex.
-	lastTaskStartTimes map[string]time.Time
-	log                *zap.Logger
-	wrapLogger         *cmdwrap.WrapLogger
-	watch              *watcher.Watcher
-	env                map[string]string
-	portManager        *portmanager.Manager
-	proxyManager       *asynkproxy.Manager
-	serviceExports     map[string]map[string]string
-	serviceExportMutex sync.Mutex
-	deps               RunnerDeps
-	runOnce            bool
-	completionChan     chan struct{}
-	rebuildSuppression *rebuildSuppressionState
+	lastTaskStartTimes  map[string]time.Time
+	log                 *zap.Logger
+	wrapLogger          *cmdwrap.WrapLogger
+	watch               *watcher.Watcher
+	env                 map[string]string
+	portManager         *portmanager.Manager
+	proxyManager        *asynkproxy.Manager
+	serviceExports      map[string]map[string]string
+	serviceExportMutex  sync.Mutex
+	deps                RunnerDeps
+	runOnce             bool
+	completionChan      chan struct{}
+	rebuildSuppression  *rebuildSuppressionState
+	readinessMutex      sync.Mutex
+	readinessPollers    map[string]context.CancelFunc
+	readinessGeneration map[string]int64
 }
 
 // RunnerDeps holds all injectable infrastructure dependencies for the Runner.
 // Use DefaultRunnerDeps() for production; provide custom implementations for testing.
 type RunnerDeps struct {
-	Platform     *util.Platform
-	FS           util.FileSystem
-	CmdFactory   cmdwrap.CommandFactory
-	PortManager  *portmanager.Manager
-	ProxyManager *asynkproxy.Manager
+	Platform         *util.Platform
+	FS               util.FileSystem
+	CmdFactory       cmdwrap.CommandFactory
+	PortManager      *portmanager.Manager
+	ProxyManager     *asynkproxy.Manager
+	ReadinessChecker ReadinessChecker
 }
 
 // DefaultRunnerDeps returns production infrastructure dependencies.
 func DefaultRunnerDeps() RunnerDeps {
 	return RunnerDeps{
-		Platform:     util.NewPlatform(),
-		FS:           util.NewOSFileSystem(),
-		CmdFactory:   cmdwrap.NewDefaultCommandFactory(cmdwrap.DefaultProcessManager()),
-		PortManager:  portmanager.NewManager(nil),
-		ProxyManager: asynkproxy.NewManager(),
+		Platform:         util.NewPlatform(),
+		FS:               util.NewOSFileSystem(),
+		CmdFactory:       cmdwrap.NewDefaultCommandFactory(cmdwrap.DefaultProcessManager()),
+		PortManager:      portmanager.NewManager(nil),
+		ProxyManager:     asynkproxy.NewManager(),
+		ReadinessChecker: defaultReadinessChecker{},
 	}
 }
 
 func NewRunner(configuration *config.Config, log *zap.Logger, runOnce bool, platform *util.Platform) *Runner {
 	deps := RunnerDeps{
-		Platform:     platform,
-		FS:           util.NewOSFileSystem(),
-		CmdFactory:   cmdwrap.NewDefaultCommandFactory(cmdwrap.DefaultProcessManager()),
-		PortManager:  portmanager.NewManager(nil),
-		ProxyManager: asynkproxy.NewManager(),
+		Platform:         platform,
+		FS:               util.NewOSFileSystem(),
+		CmdFactory:       cmdwrap.NewDefaultCommandFactory(cmdwrap.DefaultProcessManager()),
+		PortManager:      portmanager.NewManager(nil),
+		ProxyManager:     asynkproxy.NewManager(),
+		ReadinessChecker: defaultReadinessChecker{},
 	}
 	return NewRunnerWithDeps(configuration, log, runOnce, deps)
 }
@@ -104,21 +124,26 @@ func NewRunnerWithDeps(configuration *config.Config, log *zap.Logger, runOnce bo
 	if deps.ProxyManager == nil {
 		deps.ProxyManager = asynkproxy.NewManager()
 	}
+	if deps.ReadinessChecker == nil {
+		deps.ReadinessChecker = defaultReadinessChecker{}
+	}
 
 	runner := &Runner{
-		Config:             configuration,
-		ScheduledTasks:     make(map[string]*ScheduledTask, 0),
-		RunningTasks:       make([]*task.RunningTask, 0),
-		lastTaskStartTimes: make(map[string]time.Time),
-		log:                log,
-		env:                make(map[string]string),
-		portManager:        deps.PortManager,
-		proxyManager:       deps.ProxyManager,
-		serviceExports:     make(map[string]map[string]string),
-		deps:               deps,
-		runOnce:            runOnce,
-		completionChan:     make(chan struct{}, 1),
-		rebuildSuppression: newRebuildSuppressionState(),
+		Config:              configuration,
+		ScheduledTasks:      make(map[string]*ScheduledTask, 0),
+		RunningTasks:        make([]*task.RunningTask, 0),
+		lastTaskStartTimes:  make(map[string]time.Time),
+		log:                 log,
+		env:                 make(map[string]string),
+		portManager:         deps.PortManager,
+		proxyManager:        deps.ProxyManager,
+		serviceExports:      make(map[string]map[string]string),
+		deps:                deps,
+		runOnce:             runOnce,
+		completionChan:      make(chan struct{}, 1),
+		rebuildSuppression:  newRebuildSuppressionState(),
+		readinessPollers:    make(map[string]context.CancelFunc),
+		readinessGeneration: make(map[string]int64),
 	}
 
 	taskIds := make([]string, 0, len(configuration.Tasks))
@@ -183,6 +208,7 @@ func (runner *Runner) Stop() {
 		runner.watch.Close()
 	}
 
+	runner.cancelAllReadinessPollers()
 	runner.stopRunningTasks()
 	runner.closeManagedProxies()
 }
@@ -234,7 +260,11 @@ func (runner *Runner) scheduleTasksFromSchedulableMap(tasks map[string]*Schedula
 
 	for _, s := range tasks {
 		runner.log.Debug("Scheduling task", zap.String("taskId", s.TaskConfiguration.Identifier))
-		scheduledTask := &ScheduledTask{TaskConfiguration: s.TaskConfiguration}
+		scheduledTask := &ScheduledTask{
+			TaskConfiguration: s.TaskConfiguration,
+			MatchedFiles:      append([]string(nil), s.MatchedFiles...),
+			StartCause:        s.StartCause,
+		}
 		runner.ScheduledTasks[scheduledTask.TaskConfiguration.Identifier] = scheduledTask
 	}
 }
@@ -245,13 +275,19 @@ func (runner *Runner) scheduleTasksFromMap(tasks map[string]*config.TaskConfig) 
 
 	for _, taskConfig := range tasks {
 		runner.log.Debug("Scheduling task", zap.String("taskId", taskConfig.Identifier))
-		scheduledTask := &ScheduledTask{TaskConfiguration: taskConfig}
+		scheduledTask := &ScheduledTask{TaskConfiguration: taskConfig, StartCause: TaskStartCauseInitial}
 		runner.ScheduledTasks[scheduledTask.TaskConfiguration.Identifier] = scheduledTask
 	}
 }
 
 func (runner *Runner) scheduleAllTasks() {
-	runner.scheduleTasksFromMap(runner.Config.Tasks)
+	tasks := make(map[string]*config.TaskConfig, len(runner.Config.Tasks))
+	for taskID, taskConfig := range runner.Config.Tasks {
+		if taskConfig.AutoStartEnabled() {
+			tasks[taskID] = taskConfig
+		}
+	}
+	runner.scheduleTasksFromMap(tasks)
 }
 
 // findTasksAffectedByFileChanges identifies which tasks should be scheduled based on file changes
@@ -291,7 +327,12 @@ func (runner *Runner) processEventTasks(event watcher.AggregatedEvent, schedulab
 
 		files, time := runner.getMatchedFileChangesForTask(taskConfig, event.Files)
 		if len(files) > 0 {
-			schedulableTasks[taskId] = &SchedulableTask{taskConfig, time}
+			schedulableTasks[taskId] = &SchedulableTask{
+				TaskConfiguration: taskConfig,
+				ModificationTime:  time,
+				MatchedFiles:      files,
+				StartCause:        TaskStartCauseFile,
+			}
 		}
 	}
 }
@@ -368,6 +409,7 @@ func (runner *Runner) onTaskFinished(taskIdentifier string, errored bool) {
 	runner.RunningTaskMutex.Unlock()
 
 	runner.releaseFinishedTaskPorts(taskIdentifier, errored)
+	runner.cancelReadinessPoller(taskIdentifier)
 
 	if errored {
 		runner.recordFailedRebuildSuppressionTaskResult(taskIdentifier)
@@ -528,6 +570,7 @@ func (runner *Runner) startScheduledTask(taskId string, scheduledTask *Scheduled
 	taskType := scheduledTask.TaskConfiguration.Type
 
 	if taskType == config.TaskType_Continuous {
+		runner.cancelReadinessPoller(taskId)
 		runner.RunningTaskMutex.Lock()
 		runningTask := runner.getRunningTask(taskId)
 		runner.RunningTaskMutex.Unlock()
@@ -560,6 +603,7 @@ func (runner *Runner) startScheduledTask(taskId string, scheduledTask *Scheduled
 		} else {
 			runner.scheduleExplicitRestartConsumersForProvider(taskId)
 		}
+		runner.startReadinessPolling(taskId, scheduledTask)
 	}
 }
 

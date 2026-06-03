@@ -70,6 +70,8 @@ const (
 )
 
 const DefaultInstanceReplaceTimeout = 6 * time.Second
+const DefaultReadinessInterval = 250 * time.Millisecond
+const DefaultReadinessTimeout = 30 * time.Second
 
 type RebuildSuppressionConfig struct {
 	Enabled *bool                  `yaml:"enabled"`
@@ -112,11 +114,26 @@ type ConsumeConfig struct {
 	OnChange ConsumeOnChange   `yaml:"on-change"`
 }
 
+type ReadinessTriggerConfig struct {
+	Task    string         `yaml:"task"`
+	Include util.GlobArray `yaml:"include"`
+	Exclude util.GlobArray `yaml:"exclude"`
+}
+
+type ReadinessConfig struct {
+	Path     string                   `yaml:"path"`
+	URL      string                   `yaml:"url"`
+	Interval util.Duration            `yaml:"interval"`
+	Timeout  util.Duration            `yaml:"timeout"`
+	Triggers []ReadinessTriggerConfig `yaml:"triggers"`
+}
+
 type TaskConfig struct {
 	Identifier string `yaml:"-"`
 	ConfigDir  string `yaml:"-"`
 	// Full command with arguments and options
 	Type       TaskType    `yaml:"type"`
+	AutoStart  *bool       `yaml:"auto-start"`
 	Run        RunCommands `yaml:"run"`
 	RunWindows RunCommands `yaml:"run-windows"`
 	RunLinux   RunCommands `yaml:"run-linux"`
@@ -140,6 +157,8 @@ type TaskConfig struct {
 	Port *PortConfig `yaml:"port"`
 	// Runtime values this task consumes from other tasks.
 	Consumes []ConsumeConfig `yaml:"consumes"`
+	// Optional HTTP readiness check for continuous tasks.
+	Readiness *ReadinessConfig `yaml:"readiness"`
 }
 
 type CleanUpTaskConfig struct {
@@ -316,4 +335,22 @@ func (config *Config) EffectiveInstanceReplaceTimeout() time.Duration {
 		return config.Shared.Instance.ReplaceTimeout.Duration
 	}
 	return DefaultInstanceReplaceTimeout
+}
+
+func (taskConfig *TaskConfig) AutoStartEnabled() bool {
+	return taskConfig == nil || taskConfig.AutoStart == nil || *taskConfig.AutoStart
+}
+
+func (readiness *ReadinessConfig) EffectiveInterval() time.Duration {
+	if readiness != nil && readiness.Interval.IsSet() {
+		return readiness.Interval.Duration
+	}
+	return DefaultReadinessInterval
+}
+
+func (readiness *ReadinessConfig) EffectiveTimeout() time.Duration {
+	if readiness != nil && readiness.Timeout.IsSet() {
+		return readiness.Timeout.Duration
+	}
+	return DefaultReadinessTimeout
 }
