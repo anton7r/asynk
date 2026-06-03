@@ -203,6 +203,9 @@ func (runner *Runner) Start() {
 
 	// Start all scheduled tasks concurrently
 	runner.startScheduledTasks()
+	if runner.runOnce {
+		runner.checkCompletion()
+	}
 }
 
 func (runner *Runner) Stop() {

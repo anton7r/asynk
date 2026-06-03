@@ -165,30 +165,49 @@ func (runner *Runner) finishReadinessPoller(taskID string, generation int64) {
 }
 
 func (runner *Runner) cancelReadinessPoller(taskID string) {
-	runner.readinessMutex.Lock()
-	defer runner.readinessMutex.Unlock()
+	var cancel context.CancelFunc
 
-	cancel := runner.readinessPollers[taskID]
+	runner.ScheduledTaskMutex.Lock()
+	runner.readinessMutex.Lock()
+
+	cancel = runner.readinessPollers[taskID]
 	if cancel != nil {
-		cancel()
 		delete(runner.readinessPollers, taskID)
 	}
 
 	runner.readinessGeneration[taskID]++
 	runner.readinessReady[taskID] = 0
+	runner.readinessMutex.Unlock()
+
+	runner.removeScheduledReadinessConsumersForProviderLocked(taskID)
+	runner.ScheduledTaskMutex.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
 }
 
 func (runner *Runner) cancelAllReadinessPollers() {
+	cancels := make([]context.CancelFunc, 0)
+
+	runner.ScheduledTaskMutex.Lock()
 	runner.readinessMutex.Lock()
-	defer runner.readinessMutex.Unlock()
 
 	for taskID, cancel := range runner.readinessPollers {
-		cancel()
+		cancels = append(cancels, cancel)
 		delete(runner.readinessPollers, taskID)
 	}
 	for taskID := range runner.readinessGeneration {
 		runner.readinessGeneration[taskID]++
 		runner.readinessReady[taskID] = 0
+	}
+	runner.readinessMutex.Unlock()
+
+	runner.removeScheduledReadinessConsumersLocked()
+	runner.ScheduledTaskMutex.Unlock()
+
+	for _, cancel := range cancels {
+		cancel()
 	}
 }
 
@@ -217,12 +236,15 @@ func (runner *Runner) scheduleReadinessConsumers(
 	matchedFiles []string,
 	generation int64,
 ) {
-	if !runner.readinessGenerationCurrent(providerTaskID, generation) {
-		return
-	}
+	scheduled := false
 
 	runner.ScheduledTaskMutex.Lock()
-	defer runner.ScheduledTaskMutex.Unlock()
+	runner.readinessMutex.Lock()
+	if runner.readinessGeneration[providerTaskID] != generation {
+		runner.readinessMutex.Unlock()
+		runner.ScheduledTaskMutex.Unlock()
+		return
+	}
 
 	for taskID, taskConfig := range runner.Config.Tasks {
 		for _, consume := range taskConfig.Consumes {
@@ -238,6 +260,7 @@ func (runner *Runner) scheduleReadinessConsumers(
 				TaskConfiguration: taskConfig,
 				StartCause:        TaskStartCauseReadiness,
 			}
+			scheduled = true
 			runner.log.Info("Scheduling readiness consumer",
 				zap.String("taskId", taskID),
 				zap.String("providerTaskId", providerTaskID),
@@ -245,8 +268,12 @@ func (runner *Runner) scheduleReadinessConsumers(
 			break
 		}
 	}
+	runner.readinessMutex.Unlock()
+	runner.ScheduledTaskMutex.Unlock()
 
-	go runner.startScheduledTasks()
+	if scheduled {
+		go runner.startScheduledTasks()
+	}
 }
 
 func (runner *Runner) readinessGenerationCurrent(taskID string, generation int64) bool {
@@ -280,5 +307,40 @@ func readinessConsumerShouldRun(
 		}
 	}
 
+	return false
+}
+
+func (runner *Runner) removeScheduledReadinessConsumersForProviderLocked(providerTaskID string) {
+	for taskID, scheduledTask := range runner.ScheduledTasks {
+		if scheduledTask == nil ||
+			scheduledTask.StartCause != TaskStartCauseReadiness ||
+			!taskConsumesReadinessProvider(scheduledTask.TaskConfiguration, providerTaskID) {
+			continue
+		}
+
+		delete(runner.ScheduledTasks, taskID)
+	}
+}
+
+func (runner *Runner) removeScheduledReadinessConsumersLocked() {
+	for taskID, scheduledTask := range runner.ScheduledTasks {
+		if scheduledTask == nil || scheduledTask.StartCause != TaskStartCauseReadiness {
+			continue
+		}
+
+		delete(runner.ScheduledTasks, taskID)
+	}
+}
+
+func taskConsumesReadinessProvider(taskConfig *config.TaskConfig, providerTaskID string) bool {
+	if taskConfig == nil {
+		return false
+	}
+
+	for _, consume := range taskConfig.Consumes {
+		if consume.Task == providerTaskID && consume.When == config.ConsumeWhen_Ready {
+			return true
+		}
+	}
 	return false
 }
