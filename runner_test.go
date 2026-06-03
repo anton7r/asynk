@@ -237,6 +237,30 @@ tasks: {}
 	assert.Empty(t, runner.ScheduledTasks)
 }
 
+func TestScheduleAllTasks_SkipsDependentsOfAutoStartFalseTasks(t *testing.T) {
+	yml := []byte(`
+tasks:
+  generate:
+    type: build
+    auto-start: false
+    run: "echo generate"
+  publish:
+    type: build
+    run: "echo publish"
+    dependencies:
+      - generate
+`)
+	cfg, err := config.LoadFromBytes(yml)
+	assert.NoError(t, err)
+
+	runner, _ := testRunnerWithDeps(t, cfg)
+	runner.scheduleAllTasks()
+
+	assert.NotContains(t, runner.ScheduledTasks, "generate")
+	assert.NotContains(t, runner.ScheduledTasks, "publish",
+		"initial scheduling must not bypass an auto-start false dependency")
+}
+
 // ============================================================
 // Tests for canStartTask
 // ============================================================

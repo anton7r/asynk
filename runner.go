@@ -28,9 +28,10 @@ type SchedulableTask struct {
 
 type ScheduledTask struct {
 	// Task configuration
-	TaskConfiguration *config.TaskConfig
-	MatchedFiles      []string
-	StartCause        TaskStartCause
+	TaskConfiguration    *config.TaskConfig
+	MatchedFiles         []string
+	StartCause           TaskStartCause
+	ReadinessGenerations map[string]int64
 }
 
 type TaskStartCause string
@@ -287,12 +288,42 @@ func (runner *Runner) scheduleTasksFromMap(tasks map[string]*config.TaskConfig) 
 
 func (runner *Runner) scheduleAllTasks() {
 	tasks := make(map[string]*config.TaskConfig, len(runner.Config.Tasks))
+	memo := make(map[string]bool, len(runner.Config.Tasks))
 	for taskID, taskConfig := range runner.Config.Tasks {
-		if taskConfig.AutoStartEnabled() {
+		if runner.shouldScheduleInitialTask(taskID, memo, map[string]bool{}) {
 			tasks[taskID] = taskConfig
 		}
 	}
 	runner.scheduleTasksFromMap(tasks)
+}
+
+func (runner *Runner) shouldScheduleInitialTask(
+	taskID string,
+	memo map[string]bool,
+	visiting map[string]bool,
+) bool {
+	if result, exists := memo[taskID]; exists {
+		return result
+	}
+
+	taskConfig := runner.Config.Tasks[taskID]
+	if taskConfig == nil || !taskConfig.AutoStartEnabled() || visiting[taskID] {
+		memo[taskID] = false
+		return false
+	}
+
+	visiting[taskID] = true
+	for _, dependency := range taskConfig.Dependencies {
+		if !runner.shouldScheduleInitialTask(dependency, memo, visiting) {
+			delete(visiting, taskID)
+			memo[taskID] = false
+			return false
+		}
+	}
+	delete(visiting, taskID)
+
+	memo[taskID] = true
+	return true
 }
 
 // findTasksAffectedByFileChanges identifies which tasks should be scheduled based on file changes
@@ -572,6 +603,15 @@ func (runner *Runner) startScheduledTasks() {
 }
 
 func (runner *Runner) startScheduledTask(taskId string, scheduledTask *ScheduledTask) {
+	if !runner.readinessScheduleCurrent(scheduledTask) {
+		runner.log.Info("Skipping stale readiness consumer",
+			zap.String("taskId", taskId))
+		if runner.runOnce {
+			runner.checkCompletion()
+		}
+		return
+	}
+
 	taskType := scheduledTask.TaskConfiguration.Type
 
 	if taskType == config.TaskType_Continuous {
@@ -664,6 +704,10 @@ func (runner *Runner) canStartTask(scheduledTask *ScheduledTask) bool {
 		if runner.isTaskInQueue(dependency) || runner.isTaskRunning(dependency) {
 			return false
 		}
+	}
+
+	if !runner.readinessScheduleCurrent(scheduledTask) {
+		return false
 	}
 
 	if !runner.consumesReady(scheduledTask.TaskConfiguration) {

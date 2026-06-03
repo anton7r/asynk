@@ -259,6 +259,9 @@ func (runner *Runner) scheduleReadinessConsumers(
 			runner.ScheduledTasks[taskID] = &ScheduledTask{
 				TaskConfiguration: taskConfig,
 				StartCause:        TaskStartCauseReadiness,
+				ReadinessGenerations: map[string]int64{
+					providerTaskID: generation,
+				},
 			}
 			scheduled = true
 			runner.log.Info("Scheduling readiness consumer",
@@ -283,12 +286,29 @@ func (runner *Runner) readinessGenerationCurrent(taskID string, generation int64
 	return runner.readinessGeneration[taskID] == generation
 }
 
+func (runner *Runner) readinessScheduleCurrent(scheduledTask *ScheduledTask) bool {
+	if scheduledTask == nil || len(scheduledTask.ReadinessGenerations) == 0 {
+		return true
+	}
+
+	runner.readinessMutex.Lock()
+	defer runner.readinessMutex.Unlock()
+
+	for providerTaskID, generation := range scheduledTask.ReadinessGenerations {
+		if runner.readinessGeneration[providerTaskID] != generation ||
+			runner.readinessReady[providerTaskID] != generation {
+			return false
+		}
+	}
+	return true
+}
+
 func readinessConsumerShouldRun(
 	consume config.ConsumeConfig,
 	startCause TaskStartCause,
 	matchedFiles []string,
 ) bool {
-	if startCause == TaskStartCauseInitial {
+	if startCause == TaskStartCauseInitial || startCause == TaskStartCauseReadiness {
 		return true
 	}
 
