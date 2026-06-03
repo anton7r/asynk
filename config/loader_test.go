@@ -705,16 +705,19 @@ tasks:
       path: /health
       interval: 10ms
       timeout: 1s
-      triggers:
-        - task: generate
-          include:
-            - "internal/routes/**"
-          exclude:
-            - "**/*_test.go"
   generate:
     type: build
     auto-start: false
     run: "echo generate"
+    consumes:
+      - task: backend
+        when: ready
+        include:
+          - "internal/routes/**"
+        exclude:
+          - "**/*_test.go"
+        env:
+          API_BASE_URL: url
 `)
 
 	cfg, err := LoadFromBytes(yml)
@@ -725,10 +728,10 @@ tasks:
 	assert.Equal(t, "/health", readiness.Path)
 	assert.Equal(t, 10*time.Millisecond, readiness.EffectiveInterval())
 	assert.Equal(t, time.Second, readiness.EffectiveTimeout())
-	require.Len(t, readiness.Triggers, 1)
-	assert.Equal(t, "generate", readiness.Triggers[0].Task)
-	assert.True(t, readiness.Triggers[0].Include.AnyMatches("internal/routes/users.go"))
-	assert.True(t, readiness.Triggers[0].Exclude.AnyMatches("internal/routes/users_test.go"))
+	consume := cfg.Tasks["generate"].Consumes[0]
+	assert.Equal(t, ConsumeWhen_Ready, consume.When)
+	assert.True(t, consume.Include.AnyMatches("internal/routes/users.go"))
+	assert.True(t, consume.Exclude.AnyMatches("internal/routes/users_test.go"))
 }
 
 func TestLoadFromBytes_ReadinessWithExplicitURL(t *testing.T) {
@@ -737,14 +740,19 @@ tasks:
   backend:
     type: continuous
     run: "go run ."
+    port:
+      preferred: 3000
     readiness:
       url: http://127.0.0.1:3000/health
-      triggers:
-        - task: generate
   generate:
     type: build
     auto-start: false
     run: "echo generate"
+    consumes:
+      - task: backend
+        when: ready
+        env:
+          API_BASE_URL: url
 `)
 
 	cfg, err := LoadFromBytes(yml)
@@ -782,8 +790,7 @@ tasks:
     type: continuous
     run: "echo backend"
     readiness:
-      triggers:
-        - task: generate
+      {}
   generate:
     type: build
     run: "echo generate"
@@ -798,8 +805,6 @@ tasks:
     readiness:
       path: /health
       url: http://127.0.0.1:3000/health
-      triggers:
-        - task: generate
   generate:
     type: build
     run: "echo generate"
@@ -821,8 +826,6 @@ tasks:
     run: "echo backend"
     readiness:
       path: /health
-      triggers:
-        - task: generate
   generate:
     type: build
     run: "echo generate"
@@ -834,48 +837,88 @@ tasks:
 	assert.Contains(t, err.Error(), "readiness path requires port")
 }
 
-func TestLoadFromBytes_ReadinessRejectsInvalidTrigger(t *testing.T) {
+func TestLoadFromBytes_ConsumesWhenReadyValidation(t *testing.T) {
 	cases := []struct {
 		name    string
 		yml     string
 		message string
 	}{
 		{
-			name: "missing target",
+			name: "invalid when",
 			yml: `
 tasks:
   backend:
     type: continuous
     run: "echo backend"
-    readiness:
-      url: http://127.0.0.1:3000/health
-      triggers:
-        - task: generate
+    port:
+      preferred: 3000
+  generate:
+    type: build
+    run: "echo generate"
+    consumes:
+      - task: backend
+        when: healthy
+        env:
+          API_BASE_URL: url
 `,
-			message: "does not exist",
+			message: "consume when is invalid",
 		},
 		{
-			name: "continuous target",
+			name: "provider without readiness",
 			yml: `
 tasks:
   backend:
     type: continuous
     run: "echo backend"
+    port:
+      preferred: 3000
+  generate:
+    type: build
+    run: "echo generate"
+    consumes:
+      - task: backend
+        when: ready
+        env:
+          API_BASE_URL: url
+`,
+			message: "does not expose readiness",
+		},
+		{
+			name: "valid ready consume",
+			yml: `
+tasks:
+  backend:
+    type: continuous
+    run: "echo backend"
+    port:
+      preferred: 3000
     readiness:
       url: http://127.0.0.1:3000/health
-      triggers:
-        - task: frontend
-  frontend:
-    type: continuous
-    run: "echo frontend"
+  generate:
+    type: build
+    run: "echo generate"
+    consumes:
+      - task: backend
+        when: ready
+        include:
+          - "internal/routes/**"
+        env:
+          API_BASE_URL: url
 `,
-			message: "must be a build task",
+			message: "",
 		},
 	}
 
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := LoadFromBytes([]byte(tt.yml))
+			cfg, err := LoadFromBytes([]byte(tt.yml))
+			if tt.message == "" {
+				require.NoError(t, err)
+				assert.Equal(t, ConsumeWhen_Ready, cfg.Tasks["generate"].Consumes[0].When)
+				assert.True(t, cfg.Tasks["generate"].Consumes[0].Include.AnyMatches("internal/routes/users.go"))
+				return
+			}
+
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tt.message)
 		})
@@ -902,8 +945,6 @@ tasks:
     readiness:
       url: http://127.0.0.1:3000/health
       %s
-      triggers:
-        - task: generate
   generate:
     type: build
     run: "echo generate"

@@ -252,3 +252,42 @@ tasks:
 ```
 
 Consumer tasks wait until provider exports are available. When a frontend consumes a backend directly with `port` or `url`, it restarts on backend port changes by default. When it consumes `proxy-url`, the proxy target updates in place and the frontend does not restart unless `on-change: restart` is configured.
+
+### Readiness-gated consumers
+
+Continuous tasks can expose an HTTP readiness endpoint. Dependent tasks can consume that readiness with `when: ready`, which waits for provider exports and for the readiness endpoint to return HTTP 200 before the consumer starts.
+
+This is useful for generated frontend API types that need a running backend OpenAPI endpoint.
+
+```yaml
+tasks:
+  backend:
+    type: continuous
+    run: "go run ./cmd/api --port ${PORT}"
+    include:
+      - "internal/**"
+    port:
+      preferred: 3000
+    readiness:
+      path: /health
+      interval: 250ms
+      timeout: 30s
+
+  frontend-openapi-types:
+    type: build
+    auto-start: false
+    cwd: ../frontend
+    run:
+      command: pnpm
+      args: [run, generate:api]
+    consumes:
+      - task: backend
+        when: ready
+        include:
+          - "internal/routes/**"
+          - "internal/models/**"
+        env:
+          API_BASE_URL: url
+```
+
+`auto-start: false` keeps the generator from running during initial task scheduling. It can still be scheduled by readiness. On the initial backend start, readiness consumers run when the backend first becomes ready. On later backend restarts, consume-level `include` and `exclude` filters decide whether the readiness consumer should run.

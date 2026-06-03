@@ -71,6 +71,7 @@ type Runner struct {
 	readinessMutex      sync.Mutex
 	readinessPollers    map[string]context.CancelFunc
 	readinessGeneration map[string]int64
+	readinessReady      map[string]int64
 }
 
 // RunnerDeps holds all injectable infrastructure dependencies for the Runner.
@@ -144,6 +145,7 @@ func NewRunnerWithDeps(configuration *config.Config, log *zap.Logger, runOnce bo
 		rebuildSuppression:  newRebuildSuppressionState(),
 		readinessPollers:    make(map[string]context.CancelFunc),
 		readinessGeneration: make(map[string]int64),
+		readinessReady:      make(map[string]int64),
 	}
 
 	taskIds := make([]string, 0, len(configuration.Tasks))

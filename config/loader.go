@@ -45,6 +45,12 @@ const (
 	ConsumeOnChange_Restart ConsumeOnChange = "restart"
 )
 
+type ConsumeWhen string
+
+const (
+	ConsumeWhen_Ready ConsumeWhen = "ready"
+)
+
 type ConsumeExport string
 
 const (
@@ -112,20 +118,16 @@ type ConsumeConfig struct {
 	Mode     ConsumeMode       `yaml:"mode"`
 	Env      map[string]string `yaml:"env"`
 	OnChange ConsumeOnChange   `yaml:"on-change"`
-}
-
-type ReadinessTriggerConfig struct {
-	Task    string         `yaml:"task"`
-	Include util.GlobArray `yaml:"include"`
-	Exclude util.GlobArray `yaml:"exclude"`
+	When     ConsumeWhen       `yaml:"when"`
+	Include  util.GlobArray    `yaml:"include"`
+	Exclude  util.GlobArray    `yaml:"exclude"`
 }
 
 type ReadinessConfig struct {
-	Path     string                   `yaml:"path"`
-	URL      string                   `yaml:"url"`
-	Interval util.Duration            `yaml:"interval"`
-	Timeout  util.Duration            `yaml:"timeout"`
-	Triggers []ReadinessTriggerConfig `yaml:"triggers"`
+	Path     string        `yaml:"path"`
+	URL      string        `yaml:"url"`
+	Interval util.Duration `yaml:"interval"`
+	Timeout  util.Duration `yaml:"timeout"`
 }
 
 type TaskConfig struct {
