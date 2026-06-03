@@ -85,6 +85,24 @@ tasks:
 	assert.NotContains(t, runner.ScheduledTasks, "generate")
 }
 
+func TestRunOnceSignalsCompletionWhenAllTasksAreAutoStartFalse(t *testing.T) {
+	runner := testRunnerForReadiness(t, `
+tasks:
+  generate:
+    type: build
+    auto-start: false
+    run: "echo generate"
+`, &sequenceReadinessChecker{}, nil)
+
+	runner.Start()
+
+	select {
+	case <-runner.completionChan:
+	case <-time.After(time.Second):
+		t.Fatal("runOnce runner did not signal completion when no tasks were scheduled")
+	}
+}
+
 func TestReadinessPollingSchedulesInitialTriggerAfterHTTP200(t *testing.T) {
 	readinessChecker := &sequenceReadinessChecker{results: []bool{false, true}}
 	factory := &recordingCommandFactory{}
@@ -269,6 +287,52 @@ tasks:
 
 	assert.Empty(t, runner.ScheduledTasks)
 	assert.False(t, factory.Called("generate"))
+}
+
+func TestCancelReadinessPollerRemovesQueuedReadinessConsumers(t *testing.T) {
+	runner := testRunnerForReadiness(t, `
+tasks:
+  backend:
+    type: continuous
+    run: "go run ."
+    port:
+      preferred: 3000
+    readiness:
+      url: http://127.0.0.1:3000/health
+  generate:
+    type: build
+    auto-start: false
+    run: "echo generate"
+    consumes:
+      - task: backend
+        when: ready
+        env:
+          API_BASE_URL: url
+`, &sequenceReadinessChecker{}, nil)
+
+	runner.readinessMutex.Lock()
+	runner.readinessGeneration["backend"] = 1
+	runner.readinessReady["backend"] = 1
+	runner.readinessMutex.Unlock()
+
+	runner.scheduleReadinessConsumers(
+		"backend",
+		TaskStartCauseInitial,
+		nil,
+		1,
+	)
+
+	assert.Eventually(t, func() bool {
+		runner.ScheduledTaskMutex.Lock()
+		defer runner.ScheduledTaskMutex.Unlock()
+		return runner.ScheduledTasks["generate"] != nil
+	}, time.Second, 5*time.Millisecond)
+
+	runner.cancelReadinessPoller("backend")
+
+	runner.ScheduledTaskMutex.Lock()
+	defer runner.ScheduledTaskMutex.Unlock()
+	assert.NotContains(t, runner.ScheduledTasks, "generate")
 }
 
 func TestReadinessTimeoutDoesNotMarkBackendFailed(t *testing.T) {
