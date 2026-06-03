@@ -257,11 +257,9 @@ func (runner *Runner) scheduleReadinessConsumers(
 			}
 
 			runner.ScheduledTasks[taskID] = &ScheduledTask{
-				TaskConfiguration: taskConfig,
-				StartCause:        TaskStartCauseReadiness,
-				ReadinessGenerations: map[string]int64{
-					providerTaskID: generation,
-				},
+				TaskConfiguration:    taskConfig,
+				StartCause:           TaskStartCauseReadiness,
+				ReadinessGenerations: runner.readyGenerationsForTaskLocked(taskConfig),
 			}
 			scheduled = true
 			runner.log.Info("Scheduling readiness consumer",
@@ -277,6 +275,25 @@ func (runner *Runner) scheduleReadinessConsumers(
 	if scheduled {
 		go runner.startScheduledTasks()
 	}
+}
+
+func (runner *Runner) readyGenerationsForTaskLocked(taskConfig *config.TaskConfig) map[string]int64 {
+	generations := make(map[string]int64)
+	if taskConfig == nil {
+		return generations
+	}
+
+	for _, consume := range taskConfig.Consumes {
+		if consume.When != config.ConsumeWhen_Ready {
+			continue
+		}
+
+		generation := runner.readinessGeneration[consume.Task]
+		if generation != 0 && runner.readinessReady[consume.Task] == generation {
+			generations[consume.Task] = generation
+		}
+	}
+	return generations
 }
 
 func (runner *Runner) readinessGenerationCurrent(taskID string, generation int64) bool {

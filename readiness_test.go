@@ -344,6 +344,83 @@ tasks:
 		"stale readiness consumer must be rechecked after it has been dequeued")
 }
 
+func TestReadinessDequeuedConsumerTracksAllReadyProviders(t *testing.T) {
+	factory := &recordingCommandFactory{}
+	runner := testRunnerForReadiness(t, `
+tasks:
+  backend-a:
+    type: continuous
+    run: "go run ./a"
+    port:
+      preferred: 3000
+    readiness:
+      url: http://127.0.0.1:3000/health
+  backend-b:
+    type: continuous
+    run: "go run ./b"
+    port:
+      preferred: 3001
+    readiness:
+      url: http://127.0.0.1:3001/health
+  generate:
+    type: build
+    auto-start: false
+    run: "echo generate"
+    consumes:
+      - task: backend-a
+        when: ready
+        env:
+          API_A_BASE_URL: url
+      - task: backend-b
+        when: ready
+        env:
+          API_B_BASE_URL: url
+`, &sequenceReadinessChecker{}, factory)
+
+	_, _, _, err := runner.prepareTaskForStart(runner.Config.Tasks["backend-a"])
+	require.NoError(t, err)
+
+	runner.readinessMutex.Lock()
+	runner.readinessGeneration["backend-a"] = 1
+	runner.readinessReady["backend-a"] = 1
+	runner.readinessGeneration["backend-b"] = 1
+	runner.readinessReady["backend-b"] = 1
+	runner.readinessMutex.Unlock()
+
+	runner.scheduleReadinessConsumers(
+		"backend-a",
+		TaskStartCauseInitial,
+		nil,
+		1,
+	)
+
+	var scheduledTask *ScheduledTask
+	assert.Eventually(t, func() bool {
+		runner.ScheduledTaskMutex.Lock()
+		defer runner.ScheduledTaskMutex.Unlock()
+		scheduledTask = runner.ScheduledTasks["generate"]
+		return scheduledTask != nil
+	}, time.Second, 5*time.Millisecond)
+	require.NotNil(t, scheduledTask)
+	assert.Equal(t, map[string]int64{
+		"backend-a": 1,
+		"backend-b": 1,
+	}, scheduledTask.ReadinessGenerations)
+
+	_, _, _, err = runner.prepareTaskForStart(runner.Config.Tasks["backend-b"])
+	require.NoError(t, err)
+
+	runner.cancelReadinessPoller("backend-b")
+	runner.readinessMutex.Lock()
+	runner.readinessReady["backend-b"] = runner.readinessGeneration["backend-b"]
+	runner.readinessMutex.Unlock()
+
+	runner.startScheduledTask("generate", scheduledTask)
+
+	assert.False(t, factory.Called("generate"),
+		"readiness consumer must not start after any consumed ready provider changes generation")
+}
+
 func TestCancelReadinessPollerRemovesQueuedReadinessConsumers(t *testing.T) {
 	runner := testRunnerForReadiness(t, `
 tasks:

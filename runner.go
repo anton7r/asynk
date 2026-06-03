@@ -320,6 +320,13 @@ func (runner *Runner) shouldScheduleInitialTask(
 			return false
 		}
 	}
+	for _, consume := range taskConfig.Consumes {
+		if !runner.shouldScheduleInitialTask(consume.Task, memo, visiting) {
+			delete(visiting, taskID)
+			memo[taskID] = false
+			return false
+		}
+	}
 	delete(visiting, taskID)
 
 	memo[taskID] = true
@@ -350,11 +357,6 @@ func (runner *Runner) processEventTasks(event watcher.AggregatedEvent, schedulab
 	for taskId := range event.Tasks {
 		runner.log.Debug("Checking if task should be scheduled", zap.String("taskId", taskId))
 
-		if _, exists := schedulableTasks[taskId]; exists {
-			runner.log.Debug("Skipping task as it's already scheduled", zap.String("taskId", taskId))
-			continue
-		}
-
 		taskConfig, exists := runner.Config.Tasks[taskId]
 		if !exists {
 			runner.log.Warn("Task not found in configuration", zap.String("taskId", taskId))
@@ -362,15 +364,42 @@ func (runner *Runner) processEventTasks(event watcher.AggregatedEvent, schedulab
 		}
 
 		files, time := runner.getMatchedFileChangesForTask(taskConfig, event.Files)
-		if len(files) > 0 {
-			schedulableTasks[taskId] = &SchedulableTask{
-				TaskConfiguration: taskConfig,
-				ModificationTime:  time,
-				MatchedFiles:      files,
-				StartCause:        TaskStartCauseFile,
+		if len(files) == 0 {
+			continue
+		}
+
+		if existing, exists := schedulableTasks[taskId]; exists {
+			existing.MatchedFiles = appendUniqueStrings(existing.MatchedFiles, files)
+			if time.After(existing.ModificationTime) {
+				existing.ModificationTime = time
 			}
+			continue
+		}
+
+		schedulableTasks[taskId] = &SchedulableTask{
+			TaskConfiguration: taskConfig,
+			ModificationTime:  time,
+			MatchedFiles:      files,
+			StartCause:        TaskStartCauseFile,
 		}
 	}
+}
+
+func appendUniqueStrings(existing []string, additions []string) []string {
+	seen := make(map[string]bool, len(existing)+len(additions))
+	for _, value := range existing {
+		seen[value] = true
+	}
+
+	result := append([]string(nil), existing...)
+	for _, value := range additions {
+		if seen[value] {
+			continue
+		}
+		seen[value] = true
+		result = append(result, value)
+	}
+	return result
 }
 
 // shouldScheduleTaskForEvent checks if any of the changed files match the task's include patterns
