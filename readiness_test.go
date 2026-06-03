@@ -289,6 +289,61 @@ tasks:
 	assert.False(t, factory.Called("generate"))
 }
 
+func TestReadinessDequeuedConsumerCannotStartAfterProviderGenerationChanges(t *testing.T) {
+	factory := &recordingCommandFactory{}
+	runner := testRunnerForReadiness(t, `
+tasks:
+  backend:
+    type: continuous
+    run: "go run ."
+    port:
+      preferred: 3000
+    readiness:
+      url: http://127.0.0.1:3000/health
+  generate:
+    type: build
+    auto-start: false
+    run: "echo generate"
+    consumes:
+      - task: backend
+        when: ready
+        env:
+          API_BASE_URL: url
+`, &sequenceReadinessChecker{}, factory)
+
+	_, _, _, err := runner.prepareTaskForStart(runner.Config.Tasks["backend"])
+	require.NoError(t, err)
+
+	runner.readinessMutex.Lock()
+	runner.readinessGeneration["backend"] = 1
+	runner.readinessReady["backend"] = 1
+	runner.readinessMutex.Unlock()
+
+	scheduledTask := &ScheduledTask{
+		TaskConfiguration: runner.Config.Tasks["generate"],
+		StartCause:        TaskStartCauseReadiness,
+		ReadinessGenerations: map[string]int64{
+			"backend": 1,
+		},
+	}
+
+	assert.True(t, runner.canStartTask(scheduledTask))
+
+	runner.cancelReadinessPoller("backend")
+
+	runner.readinessMutex.Lock()
+	runner.readinessReady["backend"] = runner.readinessGeneration["backend"]
+	runner.readinessMutex.Unlock()
+
+	assert.False(t, runner.canStartTask(scheduledTask),
+		"readiness consumer from an old provider generation must not start after the provider restarts")
+
+	runner.startScheduledTask("generate", scheduledTask)
+
+	assert.False(t, factory.Called("generate"),
+		"stale readiness consumer must be rechecked after it has been dequeued")
+}
+
 func TestCancelReadinessPollerRemovesQueuedReadinessConsumers(t *testing.T) {
 	runner := testRunnerForReadiness(t, `
 tasks:
@@ -333,6 +388,59 @@ tasks:
 	runner.ScheduledTaskMutex.Lock()
 	defer runner.ScheduledTaskMutex.Unlock()
 	assert.NotContains(t, runner.ScheduledTasks, "generate")
+}
+
+func TestReadinessTriggeredProviderSchedulesDownstreamReadinessConsumers(t *testing.T) {
+	runner := testRunnerForReadiness(t, `
+tasks:
+  backend:
+    type: continuous
+    run: "echo backend"
+    port:
+      preferred: 3000
+    readiness:
+      url: http://127.0.0.1:3000/health
+  gateway:
+    type: continuous
+    auto-start: false
+    run: "echo gateway"
+    port:
+      preferred: 3001
+    readiness:
+      url: http://127.0.0.1:3001/health
+    consumes:
+      - task: backend
+        when: ready
+        env:
+          API_BASE_URL: url
+  generate:
+    type: build
+    auto-start: false
+    run: "echo generate"
+    consumes:
+      - task: gateway
+        when: ready
+        env:
+          GATEWAY_BASE_URL: url
+`, &sequenceReadinessChecker{}, nil)
+
+	runner.readinessMutex.Lock()
+	runner.readinessGeneration["gateway"] = 1
+	runner.readinessReady["gateway"] = 1
+	runner.readinessMutex.Unlock()
+
+	runner.scheduleReadinessConsumers(
+		"gateway",
+		TaskStartCauseReadiness,
+		nil,
+		1,
+	)
+
+	assert.Eventually(t, func() bool {
+		runner.ScheduledTaskMutex.Lock()
+		defer runner.ScheduledTaskMutex.Unlock()
+		return runner.ScheduledTasks["generate"] != nil
+	}, time.Second, 5*time.Millisecond)
 }
 
 func TestReadinessTimeoutDoesNotMarkBackendFailed(t *testing.T) {
