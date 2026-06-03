@@ -261,6 +261,34 @@ tasks:
 		"initial scheduling must not bypass an auto-start false dependency")
 }
 
+func TestScheduleAllTasks_SkipsConsumersOfAutoStartFalseTasks(t *testing.T) {
+	yml := []byte(`
+tasks:
+  backend:
+    type: continuous
+    auto-start: false
+    run: "echo backend"
+    port:
+      preferred: 3000
+  generate:
+    type: build
+    run: "echo generate"
+    consumes:
+      - task: backend
+        env:
+          API_BASE_URL: url
+`)
+	cfg, err := config.LoadFromBytes(yml)
+	assert.NoError(t, err)
+
+	runner, _ := testRunnerWithDeps(t, cfg)
+	runner.scheduleAllTasks()
+
+	assert.NotContains(t, runner.ScheduledTasks, "backend")
+	assert.NotContains(t, runner.ScheduledTasks, "generate",
+		"initial scheduling must not queue consumers whose providers are skipped")
+}
+
 // ============================================================
 // Tests for canStartTask
 // ============================================================
@@ -493,6 +521,52 @@ func TestFindTasksAffectedByFileChanges_TracksModificationTime(t *testing.T) {
 	result := runner.findTasksAffectedByFileChanges(events)
 	assert.Contains(t, result, "build")
 	assert.Equal(t, modTime, result["build"].ModificationTime)
+}
+
+func TestProcessEventTasks_MergesMatchedFilesAcrossEvents(t *testing.T) {
+	yml := []byte(`
+tasks:
+  backend:
+    type: continuous
+    run: "echo backend"
+    include:
+      - "internal/routes/**"
+      - "internal/models/**"
+`)
+	cfg, err := config.LoadFromBytes(yml)
+	assert.NoError(t, err)
+
+	runner, _ := testRunnerWithDeps(t, cfg)
+
+	earlier := time.Date(2026, 1, 15, 10, 30, 0, 0, time.UTC)
+	later := earlier.Add(time.Minute)
+	schedulableTasks := map[string]*SchedulableTask{}
+
+	runner.processEventTasks(watcher.AggregatedEvent{
+		Dir: "internal/routes",
+		Files: map[string]*watcher.UpdatedFile{
+			"internal/routes/users.go": {ModifiedTime: earlier},
+		},
+		Tasks: map[string]bool{
+			"backend": true,
+		},
+	}, schedulableTasks)
+	runner.processEventTasks(watcher.AggregatedEvent{
+		Dir: "internal/models",
+		Files: map[string]*watcher.UpdatedFile{
+			"internal/models/user.go": {ModifiedTime: later},
+		},
+		Tasks: map[string]bool{
+			"backend": true,
+		},
+	}, schedulableTasks)
+
+	assert.Contains(t, schedulableTasks, "backend")
+	assert.ElementsMatch(t,
+		[]string{"internal/routes/users.go", "internal/models/user.go"},
+		schedulableTasks["backend"].MatchedFiles,
+	)
+	assert.Equal(t, later, schedulableTasks["backend"].ModificationTime)
 }
 
 // ============================================================
