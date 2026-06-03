@@ -241,7 +241,10 @@ func (runner *Runner) scheduleExplicitRestartConsumersForProvider(providerTaskID
 				continue
 			}
 
-			runner.ScheduledTasks[taskID] = &ScheduledTask{TaskConfiguration: taskConfig}
+			runner.ScheduledTasks[taskID] = &ScheduledTask{
+				TaskConfiguration: taskConfig,
+				StartCause:        TaskStartCauseProvider,
+			}
 		}
 	}
 }
@@ -253,7 +256,10 @@ func (runner *Runner) scheduleConsumersForProviderLocked(providerTaskID string) 
 				continue
 			}
 
-			runner.ScheduledTasks[taskID] = &ScheduledTask{TaskConfiguration: taskConfig}
+			runner.ScheduledTasks[taskID] = &ScheduledTask{
+				TaskConfiguration: taskConfig,
+				StartCause:        TaskStartCauseProvider,
+			}
 		}
 	}
 }
@@ -355,6 +361,7 @@ func cloneTaskConfig(taskConfig *config.TaskConfig) *config.TaskConfig {
 	clone.RebuildSuppression = taskConfig.RebuildSuppression
 	clone.Dependencies = append(configutil.StringArray{}, taskConfig.Dependencies...)
 	clone.Env = append(configutil.StringArray{}, taskConfig.Env...)
+	clone.Readiness = cloneReadinessConfig(taskConfig.Readiness)
 	clone.Consumes = make([]config.ConsumeConfig, len(taskConfig.Consumes))
 	for i, consume := range taskConfig.Consumes {
 		clone.Consumes[i] = consume
@@ -364,6 +371,21 @@ func cloneTaskConfig(taskConfig *config.TaskConfig) *config.TaskConfig {
 				clone.Consumes[i].Env[key] = value
 			}
 		}
+	}
+	return &clone
+}
+
+func cloneReadinessConfig(readiness *config.ReadinessConfig) *config.ReadinessConfig {
+	if readiness == nil {
+		return nil
+	}
+
+	clone := *readiness
+	clone.Triggers = make([]config.ReadinessTriggerConfig, len(readiness.Triggers))
+	for i, trigger := range readiness.Triggers {
+		clone.Triggers[i] = trigger
+		clone.Triggers[i].Include = append(configutil.GlobArray{}, trigger.Include...)
+		clone.Triggers[i].Exclude = append(configutil.GlobArray{}, trigger.Exclude...)
 	}
 	return &clone
 }

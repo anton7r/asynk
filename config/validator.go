@@ -333,6 +333,54 @@ func (v *validator) validateConsumes() error {
 	return nil
 }
 
+func (v *validator) validateReadiness() error {
+	for _, taskConfig := range v.config.Tasks {
+		readiness := taskConfig.Readiness
+		if readiness == nil {
+			continue
+		}
+
+		if taskConfig.Type != TaskType_Continuous {
+			return fmt.Errorf("invalid task configuration, readiness can only be configured for continuous tasks: %s", taskConfig.Identifier)
+		}
+
+		hasPath := strings.TrimSpace(readiness.Path) != ""
+		hasURL := strings.TrimSpace(readiness.URL) != ""
+		if hasPath == hasURL {
+			return fmt.Errorf("invalid task configuration, readiness needs exactly one of path or url: %s", taskConfig.Identifier)
+		}
+
+		if hasPath && taskConfig.Port == nil {
+			return fmt.Errorf("invalid task configuration, readiness path requires port configuration: %s", taskConfig.Identifier)
+		}
+
+		if readiness.Interval.IsSet() && readiness.Interval.Duration <= 0 {
+			return fmt.Errorf("invalid task configuration, readiness interval must be positive: %s", taskConfig.Identifier)
+		}
+
+		if readiness.Timeout.IsSet() && readiness.Timeout.Duration <= 0 {
+			return fmt.Errorf("invalid task configuration, readiness timeout must be positive: %s", taskConfig.Identifier)
+		}
+
+		for _, trigger := range readiness.Triggers {
+			if trigger.Task == "" {
+				return fmt.Errorf("invalid task configuration, readiness trigger task is missing: %s", taskConfig.Identifier)
+			}
+
+			target, exists := v.config.Tasks[trigger.Task]
+			if !exists {
+				return fmt.Errorf("invalid task configuration, readiness trigger task '%s' does not exist: %s", trigger.Task, taskConfig.Identifier)
+			}
+
+			if target.Type != TasKType_Build {
+				return fmt.Errorf("invalid task configuration, readiness trigger task '%s' must be a build task: %s", trigger.Task, taskConfig.Identifier)
+			}
+		}
+	}
+
+	return nil
+}
+
 func (v *validator) validateConsumeCycles() error {
 	visited := make(map[string]bool)
 	visiting := make(map[string]bool)
@@ -523,6 +571,7 @@ func validateConfig(config *Config) error {
 		validator.validateCleanUpTasks,
 		validator.validatePortConfigs,
 		validator.validateConsumes,
+		validator.validateReadiness,
 		validator.validateConsumeCycles,
 	}
 

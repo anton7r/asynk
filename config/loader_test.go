@@ -1,10 +1,12 @@
 package config
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func validYAML() []byte {
@@ -673,6 +675,245 @@ tasks:
 	assert.Equal(t, ConsumeMode_Proxy, frontend.Consumes[0].Mode)
 	assert.Equal(t, "proxy-url", frontend.Consumes[0].Env["VITE_API_URL"])
 	assert.Equal(t, ConsumeOnChange_None, frontend.Consumes[0].OnChange)
+}
+
+func TestLoadFromBytes_AutoStartFalse(t *testing.T) {
+	yml := []byte(`
+tasks:
+  generate:
+    type: build
+    auto-start: false
+    run: "echo generate"
+`)
+
+	cfg, err := LoadFromBytes(yml)
+
+	require.NoError(t, err)
+	require.NotNil(t, cfg.Tasks["generate"].AutoStart)
+	assert.False(t, cfg.Tasks["generate"].AutoStartEnabled())
+}
+
+func TestLoadFromBytes_ReadinessWithManagedPath(t *testing.T) {
+	yml := []byte(`
+tasks:
+  backend:
+    type: continuous
+    run: "go run . --port ${PORT}"
+    port:
+      preferred: 3000
+    readiness:
+      path: /health
+      interval: 10ms
+      timeout: 1s
+      triggers:
+        - task: generate
+          include:
+            - "internal/routes/**"
+          exclude:
+            - "**/*_test.go"
+  generate:
+    type: build
+    auto-start: false
+    run: "echo generate"
+`)
+
+	cfg, err := LoadFromBytes(yml)
+
+	require.NoError(t, err)
+	readiness := cfg.Tasks["backend"].Readiness
+	require.NotNil(t, readiness)
+	assert.Equal(t, "/health", readiness.Path)
+	assert.Equal(t, 10*time.Millisecond, readiness.EffectiveInterval())
+	assert.Equal(t, time.Second, readiness.EffectiveTimeout())
+	require.Len(t, readiness.Triggers, 1)
+	assert.Equal(t, "generate", readiness.Triggers[0].Task)
+	assert.True(t, readiness.Triggers[0].Include.AnyMatches("internal/routes/users.go"))
+	assert.True(t, readiness.Triggers[0].Exclude.AnyMatches("internal/routes/users_test.go"))
+}
+
+func TestLoadFromBytes_ReadinessWithExplicitURL(t *testing.T) {
+	yml := []byte(`
+tasks:
+  backend:
+    type: continuous
+    run: "go run ."
+    readiness:
+      url: http://127.0.0.1:3000/health
+      triggers:
+        - task: generate
+  generate:
+    type: build
+    auto-start: false
+    run: "echo generate"
+`)
+
+	cfg, err := LoadFromBytes(yml)
+
+	require.NoError(t, err)
+	assert.Equal(t, "http://127.0.0.1:3000/health", cfg.Tasks["backend"].Readiness.URL)
+	assert.Equal(t, DefaultReadinessInterval, cfg.Tasks["backend"].Readiness.EffectiveInterval())
+	assert.Equal(t, DefaultReadinessTimeout, cfg.Tasks["backend"].Readiness.EffectiveTimeout())
+}
+
+func TestLoadFromBytes_ReadinessRejectsBuildTask(t *testing.T) {
+	yml := []byte(`
+tasks:
+  backend:
+    type: build
+    run: "echo backend"
+    readiness:
+      url: http://127.0.0.1:3000/health
+  generate:
+    type: build
+    run: "echo generate"
+`)
+
+	_, err := LoadFromBytes(yml)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "readiness can only be configured for continuous tasks")
+}
+
+func TestLoadFromBytes_ReadinessRejectsMissingAndDuplicatedHealthSource(t *testing.T) {
+	cases := []string{
+		`
+tasks:
+  backend:
+    type: continuous
+    run: "echo backend"
+    readiness:
+      triggers:
+        - task: generate
+  generate:
+    type: build
+    run: "echo generate"
+`,
+		`
+tasks:
+  backend:
+    type: continuous
+    run: "echo backend"
+    port:
+      preferred: 3000
+    readiness:
+      path: /health
+      url: http://127.0.0.1:3000/health
+      triggers:
+        - task: generate
+  generate:
+    type: build
+    run: "echo generate"
+`,
+	}
+
+	for _, yml := range cases {
+		_, err := LoadFromBytes([]byte(yml))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "readiness needs exactly one of path or url")
+	}
+}
+
+func TestLoadFromBytes_ReadinessPathRequiresPort(t *testing.T) {
+	yml := []byte(`
+tasks:
+  backend:
+    type: continuous
+    run: "echo backend"
+    readiness:
+      path: /health
+      triggers:
+        - task: generate
+  generate:
+    type: build
+    run: "echo generate"
+`)
+
+	_, err := LoadFromBytes(yml)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "readiness path requires port")
+}
+
+func TestLoadFromBytes_ReadinessRejectsInvalidTrigger(t *testing.T) {
+	cases := []struct {
+		name    string
+		yml     string
+		message string
+	}{
+		{
+			name: "missing target",
+			yml: `
+tasks:
+  backend:
+    type: continuous
+    run: "echo backend"
+    readiness:
+      url: http://127.0.0.1:3000/health
+      triggers:
+        - task: generate
+`,
+			message: "does not exist",
+		},
+		{
+			name: "continuous target",
+			yml: `
+tasks:
+  backend:
+    type: continuous
+    run: "echo backend"
+    readiness:
+      url: http://127.0.0.1:3000/health
+      triggers:
+        - task: frontend
+  frontend:
+    type: continuous
+    run: "echo frontend"
+`,
+			message: "must be a build task",
+		},
+	}
+
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := LoadFromBytes([]byte(tt.yml))
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.message)
+		})
+	}
+}
+
+func TestLoadFromBytes_ReadinessRejectsNonPositiveDurations(t *testing.T) {
+	cases := []struct {
+		name    string
+		field   string
+		message string
+	}{
+		{name: "interval", field: "interval: 0s", message: "readiness interval must be positive"},
+		{name: "timeout", field: "timeout: -1ms", message: "readiness timeout must be positive"},
+	}
+
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			yml := []byte(fmt.Sprintf(`
+tasks:
+  backend:
+    type: continuous
+    run: "echo backend"
+    readiness:
+      url: http://127.0.0.1:3000/health
+      %s
+      triggers:
+        - task: generate
+  generate:
+    type: build
+    run: "echo generate"
+`, tt.field))
+
+			_, err := LoadFromBytes(yml)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.message)
+		})
+	}
 }
 
 func TestLoadFromBytes_PortConfigAllowsPreferredWithoutRange(t *testing.T) {
