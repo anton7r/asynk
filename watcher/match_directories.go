@@ -152,6 +152,71 @@ func globallyExcludedPathMatches(globallyExcluded util.GlobArray, pathStr string
 	return false
 }
 
+func seedExistingIncludeRoots(
+	watchable *WatchableDirectories,
+	globallyExcluded util.GlobArray,
+	taskConfigs TaskConfigMap,
+	fs asynkutil.FileSystem,
+) {
+	for taskId, taskConfig := range taskConfigs {
+		for _, include := range taskConfig.Include {
+			root := includeRootFromPattern(include.String())
+			if globallyExcludedPathMatches(globallyExcluded, root) {
+				continue
+			}
+			if !existingDirectory(fs, root) {
+				continue
+			}
+
+			updateWatchableDirectoryWithAncestors(watchable, root, map[string]bool{taskId: true})
+		}
+	}
+}
+
+func includeRootFromPattern(pattern string) string {
+	pattern = normalizePathForLookup(pattern)
+	parts := strings.Split(pattern, "/")
+	literalParts := make([]string, 0, len(parts))
+
+	for _, part := range parts {
+		if containsGlobMeta(part) {
+			break
+		}
+		literalParts = append(literalParts, part)
+	}
+
+	if len(literalParts) == len(parts) {
+		return path.Dir(pattern)
+	}
+	if len(literalParts) == 0 {
+		return "."
+	}
+
+	return strings.Join(literalParts, "/")
+}
+
+func containsGlobMeta(value string) bool {
+	return strings.ContainsAny(value, "*?[{")
+}
+
+func existingDirectory(fs asynkutil.FileSystem, dirPath string) bool {
+	candidates := []string{dirPath}
+	if dirPath == "." {
+		candidates = append(candidates, "./")
+	} else if !strings.HasPrefix(dirPath, "./") {
+		candidates = append(candidates, "./"+dirPath)
+	}
+
+	for _, candidate := range candidates {
+		info, err := fs.Lstat(candidate)
+		if err == nil && info.IsDir() {
+			return true
+		}
+	}
+
+	return false
+}
+
 func map2fields[T any](m map[string]T) []zap.Field {
 	fields := make([]zap.Field, 0, len(m))
 	for k, v := range m {
@@ -187,6 +252,7 @@ func MatchWatchableDirectoriesWithFS(
 	if err := fs.Walk("./", newWatchableDirectoryMatcher(watchable, globallyExcluded, taskConfigs, log)); err != nil {
 		log.Error("Failed to walk filesystem for watchable directories", zap.Error(err))
 	}
+	seedExistingIncludeRoots(watchable, globallyExcluded, taskConfigs, fs)
 
 	log.Info("Matched watchable directories",
 		zap.Int("matched_directories", len(watchable.directories)),
