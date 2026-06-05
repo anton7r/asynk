@@ -26,12 +26,7 @@ dependency array.
 - You can decide which commands block the execution of other commands.
 - Supports per-task working directories.
 - Supports env files and per-task environment variables.
-
-## Road to V1
-
-- Watching new folders created after asynk was started
-- Support env file loading and allow the user of asynk to specify passed env values for tasks.
-- Other things missing?
+- Watches newly created directories after startup.
 
 ## Installation
 

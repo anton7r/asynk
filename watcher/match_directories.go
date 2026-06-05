@@ -20,8 +20,9 @@ type WatchableDirectory struct {
 }
 
 type WatchableDirectories struct {
-	directories map[string]WatchableDirectory
-	taskConfigs TaskConfigMap
+	directories      map[string]WatchableDirectory
+	taskConfigs      TaskConfigMap
+	globallyExcluded util.GlobArray
 }
 
 type TaskConfigMap = map[string]*config.TaskConfig
@@ -152,8 +153,9 @@ func MatchWatchableDirectoriesWithFS(
 		fs = asynkutil.NewOSFileSystem()
 	}
 	watchable := &WatchableDirectories{
-		directories: make(map[string]WatchableDirectory),
-		taskConfigs: taskConfigs,
+		directories:      make(map[string]WatchableDirectory),
+		taskConfigs:      taskConfigs,
+		globallyExcluded: globallyExcluded,
 	}
 
 	// List all items in the directory - assume current directory

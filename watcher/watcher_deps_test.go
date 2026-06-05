@@ -674,8 +674,7 @@ func TestHandleFsEvent_LstatError(t *testing.T) {
 	w.Close()
 }
 
-func TestHandleFsEvent_DirectoryCreateIgnored(t *testing.T) {
-	// When a directory is created, the watcher should not aggregate a file event.
+func TestHandleFsEvent_DirectoryCreateWatchesEmptyDirectory(t *testing.T) {
 	logger := zap.NewNop()
 	mfs := newMockFS()
 	mfs.addDir("src/newpkg")
@@ -704,11 +703,220 @@ func TestHandleFsEvent_DirectoryCreateIgnored(t *testing.T) {
 		Op:   fsnotify.Create,
 	})
 
-	// Directory creates go into the else branch (TODO: add new watchers) and
-	// don't call checkIfWeNeedToNotify.
+	fw.mu.Lock()
+	assert.Contains(t, fw.addedDirs, "./src/newpkg")
+	fw.mu.Unlock()
+
 	time.Sleep(300 * time.Millisecond)
 	assert.False(t, propagateCalled,
-		"propagate should not be called for directory creation")
+		"empty directory creation should not propagate a file event")
+
+	w.Close()
+}
+
+func TestHandleFsEvent_DirectoryCreateScansExistingMatchingFiles(t *testing.T) {
+	logger := zap.NewNop()
+	mfs := newMockFS()
+	modTime := time.Date(2026, 4, 2, 9, 15, 0, 0, time.UTC)
+	mfs.addDir("src/newpkg")
+	mfs.addFile("src/newpkg/main.go", modTime)
+
+	taskConfigs := TaskConfigMap{
+		"build": &config.TaskConfig{
+			Include: configutil.NewGlobArray("**/*.go"),
+			Exclude: configutil.NewGlobArray(),
+		},
+	}
+	dirs := &WatchableDirectories{
+		directories: map[string]WatchableDirectory{
+			"src": {
+				MatchedDirectory: "src",
+				RelativePath:     "./src",
+				TaskIds:          map[string]bool{"build": true},
+			},
+		},
+		taskConfigs: taskConfigs,
+	}
+
+	eventsChan := make(chan map[string]AggregatedEvent, 1)
+	fw := newTestFsWatcher()
+	w, err := NewWatcherWithDepsAndOptions(
+		logger,
+		dirs,
+		func(events map[string]AggregatedEvent) { eventsChan <- events },
+		mfs,
+		fw,
+		WatcherOptions{DefaultFSDebounce: 0, DefaultFSDebounceSet: true},
+	)
+	assert.NoError(t, err)
+
+	w.handleFsEvent(fsnotify.Event{
+		Name: "src/newpkg",
+		Op:   fsnotify.Create,
+	})
+
+	fw.mu.Lock()
+	assert.Contains(t, fw.addedDirs, "./src/newpkg")
+	fw.mu.Unlock()
+
+	select {
+	case events := <-eventsChan:
+		assert.Contains(t, events, "src/newpkg")
+		assert.Contains(t, events["src/newpkg"].Files, "src/newpkg/main.go")
+		assert.Equal(t, modTime, events["src/newpkg"].Files["src/newpkg/main.go"].ModifiedTime)
+		assert.True(t, events["src/newpkg"].Tasks["build"])
+	case <-time.After(2 * time.Second):
+		t.Fatal("Timed out waiting for scanned directory file event")
+	}
+
+	w.Close()
+}
+
+func TestHandleFsEvent_DirectoryCreateScansCopiedTreeRecursively(t *testing.T) {
+	logger := zap.NewNop()
+	mfs := newMockFS()
+	modTime := time.Date(2026, 4, 2, 10, 0, 0, 0, time.UTC)
+	mfs.addDir("src/newpkg")
+	mfs.addDir("src/newpkg/sub")
+	mfs.addFile("src/newpkg/sub/handler.go", modTime)
+
+	taskConfigs := TaskConfigMap{
+		"build": &config.TaskConfig{
+			Include: configutil.NewGlobArray("**/*.go"),
+			Exclude: configutil.NewGlobArray(),
+		},
+	}
+	dirs := &WatchableDirectories{
+		directories: map[string]WatchableDirectory{
+			"src": {
+				MatchedDirectory: "src",
+				RelativePath:     "./src",
+				TaskIds:          map[string]bool{"build": true},
+			},
+		},
+		taskConfigs: taskConfigs,
+	}
+
+	eventsChan := make(chan map[string]AggregatedEvent, 1)
+	fw := newTestFsWatcher()
+	w, err := NewWatcherWithDepsAndOptions(
+		logger,
+		dirs,
+		func(events map[string]AggregatedEvent) { eventsChan <- events },
+		mfs,
+		fw,
+		WatcherOptions{DefaultFSDebounce: 0, DefaultFSDebounceSet: true},
+	)
+	assert.NoError(t, err)
+
+	w.handleFsEvent(fsnotify.Event{
+		Name: "src/newpkg",
+		Op:   fsnotify.Create,
+	})
+
+	fw.mu.Lock()
+	assert.Contains(t, fw.addedDirs, "./src/newpkg")
+	assert.Contains(t, fw.addedDirs, "./src/newpkg/sub")
+	fw.mu.Unlock()
+
+	select {
+	case events := <-eventsChan:
+		assert.Len(t, events, 1)
+		assert.Contains(t, events, "src/newpkg/sub")
+		assert.Contains(t, events["src/newpkg/sub"].Files, "src/newpkg/sub/handler.go")
+		assert.True(t, events["src/newpkg/sub"].Tasks["build"])
+	case <-time.After(2 * time.Second):
+		t.Fatal("Timed out waiting for recursive scanned directory file event")
+	}
+
+	w.Close()
+}
+
+func TestHandleFsEvent_DirectoryCreateSkipsGlobalExclude(t *testing.T) {
+	logger := zap.NewNop()
+	mfs := newMockFS()
+	mfs.addDir("src/node_modules")
+	mfs.addFile("src/node_modules/pkg.js", time.Now())
+
+	dirs := &WatchableDirectories{
+		directories: map[string]WatchableDirectory{
+			"src": {
+				MatchedDirectory: "src",
+				RelativePath:     "./src",
+				TaskIds:          map[string]bool{"build": true},
+			},
+		},
+		globallyExcluded: configutil.NewGlobArray("**/node_modules"),
+	}
+
+	propagateCalled := false
+	fw := newTestFsWatcher()
+	w, err := NewWatcherWithDeps(logger, dirs, func(events map[string]AggregatedEvent) { propagateCalled = true }, mfs, fw)
+	assert.NoError(t, err)
+
+	w.handleFsEvent(fsnotify.Event{
+		Name: "src/node_modules",
+		Op:   fsnotify.Create,
+	})
+
+	fw.mu.Lock()
+	assert.NotContains(t, fw.addedDirs, "./src/node_modules")
+	fw.mu.Unlock()
+
+	time.Sleep(300 * time.Millisecond)
+	assert.False(t, propagateCalled,
+		"globally excluded directory creation should not propagate a file event")
+
+	w.Close()
+}
+
+func TestHandleFsEvent_DirectoryCreateWatchesFutureFiles(t *testing.T) {
+	logger := zap.NewNop()
+	mfs := newMockFS()
+	mfs.addDir("src/newpkg")
+	modTime := time.Date(2026, 4, 2, 11, 0, 0, 0, time.UTC)
+
+	dirs := &WatchableDirectories{
+		directories: map[string]WatchableDirectory{
+			"src": {
+				MatchedDirectory: "src",
+				RelativePath:     "./src",
+				TaskIds:          map[string]bool{"build": true},
+			},
+		},
+	}
+
+	eventsChan := make(chan map[string]AggregatedEvent, 1)
+	fw := newTestFsWatcher()
+	w, err := NewWatcherWithDepsAndOptions(
+		logger,
+		dirs,
+		func(events map[string]AggregatedEvent) { eventsChan <- events },
+		mfs,
+		fw,
+		WatcherOptions{DefaultFSDebounce: 0, DefaultFSDebounceSet: true},
+	)
+	assert.NoError(t, err)
+
+	w.handleFsEvent(fsnotify.Event{
+		Name: "src/newpkg",
+		Op:   fsnotify.Create,
+	})
+	mfs.addFile("src/newpkg/main.go", modTime)
+	w.handleFsEvent(fsnotify.Event{
+		Name: "src/newpkg/main.go",
+		Op:   fsnotify.Create,
+	})
+
+	select {
+	case events := <-eventsChan:
+		assert.Contains(t, events, "src/newpkg")
+		assert.Contains(t, events["src/newpkg"].Files, "src/newpkg/main.go")
+		assert.Equal(t, modTime, events["src/newpkg"].Files["src/newpkg/main.go"].ModifiedTime)
+		assert.True(t, events["src/newpkg"].Tasks["build"])
+	case <-time.After(2 * time.Second):
+		t.Fatal("Timed out waiting for future file event in newly watched directory")
+	}
 
 	w.Close()
 }
