@@ -434,6 +434,39 @@ func TestFindTasksAffectedByFileChanges_MatchingEvent(t *testing.T) {
 	assert.Contains(t, result, "server")
 }
 
+func TestFindTasksAffectedByFileChanges_MatchesDotSlashIncludeForNormalizedPath(t *testing.T) {
+	yml := []byte(`
+tasks:
+  build:
+    type: continuous
+    run: "echo build"
+    include:
+      - "./src/**/*.go"
+`)
+	cfg, err := config.LoadFromBytes(yml)
+	assert.NoError(t, err)
+
+	runner, _ := testRunnerWithDeps(t, cfg)
+
+	now := time.Now()
+	events := map[string]watcher.AggregatedEvent{
+		"src/newpkg": {
+			Dir: "src/newpkg",
+			Files: map[string]*watcher.UpdatedFile{
+				"src/newpkg/main.go": {ModifiedTime: now},
+			},
+			Tasks: map[string]bool{
+				"build": true,
+			},
+		},
+	}
+
+	result := runner.findTasksAffectedByFileChanges(events)
+	if assert.Contains(t, result, "build") {
+		assert.Equal(t, []string{"src/newpkg/main.go"}, result["build"].MatchedFiles)
+	}
+}
+
 func TestFindTasksAffectedByFileChanges_NoMatchingFiles(t *testing.T) {
 	cfg := testConfig(t)
 	runner, _ := testRunnerWithDeps(t, cfg)
