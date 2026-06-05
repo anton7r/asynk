@@ -239,13 +239,100 @@ func (w *Watcher) handleFsEvent(event fsnotify.Event) {
 	isDir := stat.IsDir()
 
 	if isDir {
-		// TODO: Add new watchers for new directories
+		w.handleDirectoryCreate(changePath)
 		return
 	}
 
 	dirPath := path.Dir(changePath)
 	w.checkIfWeNeedToNotify(changePath, dirPath, modifiedTime)
 
+}
+
+func (w *Watcher) handleDirectoryCreate(dirPath string) {
+	if w.directories == nil {
+		return
+	}
+
+	dirPath = normalizePathForLookup(dirPath)
+	if w.isGloballyExcludedDirectory(dirPath) {
+		w.log.Debug("Skipping globally excluded directory",
+			zap.String("directory", dirPath),
+		)
+		return
+	}
+
+	parentDirPath := path.Dir(dirPath)
+	_, _, parentDirectory, ok := w.findWatchableDirectory(parentDirPath, dirPath)
+	if !ok {
+		w.log.Info("Parent directory not found in watchable directories",
+			zap.String("directory", parentDirPath),
+			zap.String("createdDirectory", dirPath),
+		)
+		return
+	}
+
+	inheritedTasks := copyTaskIds(parentDirectory.TaskIds)
+	if err := w.fs.Walk(dirPath, func(pathStr string, info os.FileInfo, err error) error {
+		if err != nil {
+			w.log.Error("Error walking created directory",
+				zap.String("directory", dirPath),
+				zap.Error(err),
+			)
+			return nil
+		}
+
+		pathStr = normalizePathForLookup(pathStr)
+		if !pathIsWithinDirectory(dirPath, pathStr) {
+			return nil
+		}
+
+		if info.IsDir() {
+			if w.isGloballyExcludedDirectory(pathStr) {
+				return filepath.SkipDir
+			}
+
+			w.watchRuntimeDirectory(pathStr, inheritedTasks)
+			return nil
+		}
+
+		w.checkIfWeNeedToNotify(pathStr, path.Dir(pathStr), info.ModTime())
+		return nil
+	}); err != nil {
+		w.log.Error("Error walking created directory",
+			zap.String("directory", dirPath),
+			zap.Error(err),
+		)
+	}
+}
+
+func (w *Watcher) watchRuntimeDirectory(dirPath string, taskIds map[string]bool) {
+	if _, _, _, ok := w.findWatchableDirectory(dirPath, dirPath); ok {
+		updateWatchableDirectory(w.directories, dirPath, taskIds)
+		return
+	}
+
+	updateWatchableDirectory(w.directories, dirPath, taskIds)
+	dir := w.directories.directories[dirPath]
+	w.log.Info("Watching newly created directory",
+		zap.String("directory", dir.MatchedDirectory),
+		zap.String("relativePath", dir.RelativePath),
+	)
+
+	if err := w.watcher.Add(dir.RelativePath); err != nil {
+		w.log.Error("Error adding newly created directory to watcher",
+			zap.String("directory", dir.MatchedDirectory),
+			zap.String("relativePath", dir.RelativePath),
+			zap.Error(err),
+		)
+	}
+}
+
+func (w *Watcher) isGloballyExcludedDirectory(dirPath string) bool {
+	return w.directories.globallyExcluded.AnyMatches(dirPath)
+}
+
+func pathIsWithinDirectory(dirPath string, candidatePath string) bool {
+	return candidatePath == dirPath || strings.HasPrefix(candidatePath, dirPath+"/")
 }
 
 func (w *Watcher) aggregateRemoveForSuppressedTasks(changePath string) bool {
