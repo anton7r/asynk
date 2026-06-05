@@ -239,6 +239,13 @@ func (w *Watcher) handleFsEvent(event fsnotify.Event) {
 	isDir := stat.IsDir()
 
 	if isDir {
+		if event.Op&fsnotify.Create != fsnotify.Create {
+			w.log.Debug("Skipping non-create directory event",
+				zap.String("eventType", event.Op.String()),
+				zap.String("directory", changePath),
+			)
+			return
+		}
 		w.handleDirectoryCreate(changePath)
 		return
 	}
@@ -308,10 +315,10 @@ func (w *Watcher) handleDirectoryCreate(dirPath string) {
 func (w *Watcher) watchRuntimeDirectory(dirPath string, taskIds map[string]bool) {
 	if _, _, _, ok := w.findWatchableDirectory(dirPath, dirPath); ok {
 		updateWatchableDirectory(w.directories, dirPath, taskIds)
-		return
+	} else {
+		updateWatchableDirectory(w.directories, dirPath, taskIds)
 	}
 
-	updateWatchableDirectory(w.directories, dirPath, taskIds)
 	dir := w.directories.directories[dirPath]
 	w.log.Info("Watching newly created directory",
 		zap.String("directory", dir.MatchedDirectory),
