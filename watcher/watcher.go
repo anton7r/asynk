@@ -246,7 +246,7 @@ func (w *Watcher) handleFsEvent(event fsnotify.Event) {
 			)
 			return
 		}
-		w.handleDirectoryCreate(changePath)
+		w.handleDirectoryCreate(changePath, time.Now())
 		return
 	}
 
@@ -255,7 +255,7 @@ func (w *Watcher) handleFsEvent(event fsnotify.Event) {
 
 }
 
-func (w *Watcher) handleDirectoryCreate(dirPath string) {
+func (w *Watcher) handleDirectoryCreate(dirPath string, discoveredAt time.Time) {
 	if w.directories == nil {
 		return
 	}
@@ -302,7 +302,7 @@ func (w *Watcher) handleDirectoryCreate(dirPath string) {
 			return nil
 		}
 
-		w.checkIfWeNeedToNotify(pathStr, path.Dir(pathStr), info.ModTime())
+		w.checkIfWeNeedToNotify(pathStr, path.Dir(pathStr), discoveredAt)
 		return nil
 	}); err != nil {
 		w.log.Error("Error walking created directory",
@@ -335,7 +335,7 @@ func (w *Watcher) watchRuntimeDirectory(dirPath string, taskIds map[string]bool)
 }
 
 func (w *Watcher) isGloballyExcludedDirectory(dirPath string) bool {
-	return w.directories.globallyExcluded.AnyMatches(dirPath)
+	return globallyExcludedPathMatches(w.directories.globallyExcluded, dirPath)
 }
 
 func pathIsWithinDirectory(dirPath string, candidatePath string) bool {
@@ -464,7 +464,8 @@ func (w *Watcher) findWatchableDirectory(dirPath string, changePath string) (str
 
 func normalizePathForLookup(value string) string {
 	value = filepath.ToSlash(value)
-	return strings.ReplaceAll(value, "\\", "/")
+	value = strings.ReplaceAll(value, "\\", "/")
+	return path.Clean(value)
 }
 
 func pathWithDirectoryStyle(targetDirPath string, sourceDirPath string, sourceFilePath string) string {

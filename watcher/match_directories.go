@@ -38,15 +38,11 @@ func newWatchableDirectoryMatcher(
 			return err
 		}
 
-		pathStr = filepath.ToSlash(pathStr)
-		// Also handle backslashes that filepath.ToSlash won't convert on Linux
-		// (filepath.ToSlash is a no-op on non-Windows platforms, but we may
-		// receive Windows-style paths in cross-platform scenarios)
-		pathStr = strings.ReplaceAll(pathStr, "\\", "/")
+		pathStr = normalizePathForLookup(pathStr)
 
 		// Skip directories that are globally excluded
 		isDir := info.IsDir()
-		if isDir && globallyExcluded.AnyMatches(pathStr) {
+		if isDir && globallyExcludedPathMatches(globallyExcluded, pathStr) {
 			return filepath.SkipDir
 		}
 
@@ -62,7 +58,7 @@ func newWatchableDirectoryMatcher(
 				zap.String("path", pathStr),
 				zap.String("dirPath", dirPath))
 
-			updateWatchableDirectory(watchable, dirPath, matchedTasks)
+			updateWatchableDirectoryWithAncestors(watchable, dirPath, matchedTasks)
 		} else {
 			logger.Debug("Path not matched",
 				zap.String("path", pathStr),
@@ -100,6 +96,7 @@ func getMatchingTasks(pathStr string, taskConfigs TaskConfigMap) map[string]bool
 
 // Helper function to update the watchable directories map
 func updateWatchableDirectory(watchable *WatchableDirectories, dirPath string, matchedTasks map[string]bool) {
+	dirPath = normalizePathForLookup(dirPath)
 	wDir, dirExists := watchable.directories[dirPath]
 
 	if !dirExists {
@@ -125,6 +122,34 @@ func updateWatchableDirectory(watchable *WatchableDirectories, dirPath string, m
 
 	// Update the map
 	watchable.directories[dirPath] = wDir
+}
+
+func updateWatchableDirectoryWithAncestors(watchable *WatchableDirectories, dirPath string, matchedTasks map[string]bool) {
+	dirPath = normalizePathForLookup(dirPath)
+	for {
+		updateWatchableDirectory(watchable, dirPath, matchedTasks)
+		if dirPath == "." {
+			return
+		}
+
+		parentDirPath := path.Dir(dirPath)
+		if parentDirPath == dirPath {
+			return
+		}
+		dirPath = parentDirPath
+	}
+}
+
+func globallyExcludedPathMatches(globallyExcluded util.GlobArray, pathStr string) bool {
+	if globallyExcluded.AnyMatches(pathStr) {
+		return true
+	}
+
+	if pathStr != "." && !strings.HasPrefix(pathStr, "./") {
+		return globallyExcluded.AnyMatches("./" + pathStr)
+	}
+
+	return false
 }
 
 func map2fields[T any](m map[string]T) []zap.Field {

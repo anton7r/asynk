@@ -792,6 +792,63 @@ func TestHandleFsEvent_DirectoryCreateRefreshesExistingWatch(t *testing.T) {
 	w.Close()
 }
 
+func TestHandleFsEvent_DirectoryCreateCanonicalizesDotSlashPath(t *testing.T) {
+	logger := zap.NewNop()
+	mfs := newMockFS()
+	mfs.addDir("./src/newpkg")
+
+	dirs := &WatchableDirectories{
+		directories: map[string]WatchableDirectory{
+			"src": {
+				MatchedDirectory: "src",
+				RelativePath:     "./src",
+				TaskIds:          map[string]bool{"build": true},
+			},
+		},
+	}
+
+	eventsChan := make(chan map[string]AggregatedEvent, 1)
+	fw := newTestFsWatcher()
+	w, err := NewWatcherWithDepsAndOptions(
+		logger,
+		dirs,
+		func(events map[string]AggregatedEvent) { eventsChan <- events },
+		mfs,
+		fw,
+		WatcherOptions{DefaultFSDebounce: 0, DefaultFSDebounceSet: true},
+	)
+	assert.NoError(t, err)
+
+	w.handleFsEvent(fsnotify.Event{
+		Name: "./src/newpkg",
+		Op:   fsnotify.Create,
+	})
+
+	fw.mu.Lock()
+	assert.Contains(t, fw.addedDirs, "./src/newpkg")
+	fw.mu.Unlock()
+	assert.Contains(t, dirs.directories, "src/newpkg")
+	assert.NotContains(t, dirs.directories, "./src/newpkg")
+
+	modTime := time.Date(2026, 4, 2, 11, 30, 0, 0, time.UTC)
+	mfs.addFile("src/newpkg/main.go", modTime)
+	w.handleFsEvent(fsnotify.Event{
+		Name: "src/newpkg/main.go",
+		Op:   fsnotify.Create,
+	})
+
+	select {
+	case events := <-eventsChan:
+		assert.Contains(t, events, "src/newpkg")
+		assert.Contains(t, events["src/newpkg"].Files, "src/newpkg/main.go")
+		assert.True(t, events["src/newpkg"].Tasks["build"])
+	case <-time.After(2 * time.Second):
+		t.Fatal("Timed out waiting for future file event in dot-slash-created directory")
+	}
+
+	w.Close()
+}
+
 func TestHandleFsEvent_DirectoryCreateScansExistingMatchingFiles(t *testing.T) {
 	logger := zap.NewNop()
 	mfs := newMockFS()
@@ -828,6 +885,7 @@ func TestHandleFsEvent_DirectoryCreateScansExistingMatchingFiles(t *testing.T) {
 	)
 	assert.NoError(t, err)
 
+	discoveryStarted := time.Now()
 	w.handleFsEvent(fsnotify.Event{
 		Name: "src/newpkg",
 		Op:   fsnotify.Create,
@@ -841,8 +899,62 @@ func TestHandleFsEvent_DirectoryCreateScansExistingMatchingFiles(t *testing.T) {
 	case events := <-eventsChan:
 		assert.Contains(t, events, "src/newpkg")
 		assert.Contains(t, events["src/newpkg"].Files, "src/newpkg/main.go")
-		assert.Equal(t, modTime, events["src/newpkg"].Files["src/newpkg/main.go"].ModifiedTime)
+		assert.False(t, events["src/newpkg"].Files["src/newpkg/main.go"].ModifiedTime.Before(discoveryStarted))
 		assert.True(t, events["src/newpkg"].Tasks["build"])
+	case <-time.After(2 * time.Second):
+		t.Fatal("Timed out waiting for scanned directory file event")
+	}
+
+	w.Close()
+}
+
+func TestHandleFsEvent_DirectoryCreateUsesDiscoveryTimeForScannedFiles(t *testing.T) {
+	logger := zap.NewNop()
+	mfs := newMockFS()
+	oldModTime := time.Date(2020, 1, 2, 3, 4, 5, 0, time.UTC)
+	mfs.addDir("src/newpkg")
+	mfs.addFile("src/newpkg/main.go", oldModTime)
+
+	taskConfigs := TaskConfigMap{
+		"build": &config.TaskConfig{
+			Include: configutil.NewGlobArray("**/*.go"),
+			Exclude: configutil.NewGlobArray(),
+		},
+	}
+	dirs := &WatchableDirectories{
+		directories: map[string]WatchableDirectory{
+			"src": {
+				MatchedDirectory: "src",
+				RelativePath:     "./src",
+				TaskIds:          map[string]bool{"build": true},
+			},
+		},
+		taskConfigs: taskConfigs,
+	}
+
+	eventsChan := make(chan map[string]AggregatedEvent, 1)
+	fw := newTestFsWatcher()
+	w, err := NewWatcherWithDepsAndOptions(
+		logger,
+		dirs,
+		func(events map[string]AggregatedEvent) { eventsChan <- events },
+		mfs,
+		fw,
+		WatcherOptions{DefaultFSDebounce: 0, DefaultFSDebounceSet: true},
+	)
+	assert.NoError(t, err)
+
+	discoveryStarted := time.Now()
+	w.handleFsEvent(fsnotify.Event{
+		Name: "src/newpkg",
+		Op:   fsnotify.Create,
+	})
+
+	select {
+	case events := <-eventsChan:
+		scannedFile := events["src/newpkg"].Files["src/newpkg/main.go"]
+		assert.NotEqual(t, oldModTime, scannedFile.ModifiedTime)
+		assert.False(t, scannedFile.ModifiedTime.Before(discoveryStarted))
 	case <-time.After(2 * time.Second):
 		t.Fatal("Timed out waiting for scanned directory file event")
 	}
@@ -1493,6 +1605,30 @@ func TestMatchWatchableDirectoriesWithFS_BasicMatching(t *testing.T) {
 		}
 	}
 	assert.True(t, foundGoDir, "Expected at least one directory with 'build' task")
+}
+
+func TestMatchWatchableDirectoriesWithFS_WatchesAncestorsOfMatchedDirectories(t *testing.T) {
+	logger := zap.NewNop()
+	mfs := newMockFS()
+
+	mfs.addDir("./")
+	mfs.addDir("./src")
+	mfs.addDir("./src/pkg")
+	mfs.addFile("./src/pkg/a.go", time.Now())
+
+	taskConfigs := TaskConfigMap{
+		"build": &config.TaskConfig{
+			Include: configutil.NewGlobArray("**/*.go"),
+			Exclude: configutil.NewGlobArray(),
+		},
+	}
+
+	result := MatchWatchableDirectoriesWithFS(logger, configutil.GlobArray{}, taskConfigs, mfs)
+
+	assert.NotNil(t, result)
+	assert.Contains(t, result.directories, "src/pkg")
+	assert.Contains(t, result.directories, "src")
+	assert.True(t, result.directories["src"].TaskIds["build"])
 }
 
 func TestMatchWatchableDirectoriesWithFS_ExcludesGlobalDirs(t *testing.T) {
