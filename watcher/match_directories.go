@@ -86,7 +86,7 @@ func getMatchingTasks(pathStr string, taskConfigs TaskConfigMap) map[string]bool
 
 	for taskId, taskConfig := range taskConfigs {
 		// A path is included if it matches an include pattern and doesn't match any exclude pattern
-		if !taskConfig.Exclude.AnyMatches(pathStr) && taskConfig.Include.AnyMatches(pathStr) {
+		if !globArrayMatchesPath(taskConfig.Exclude, pathStr) && globArrayMatchesPath(taskConfig.Include, pathStr) {
 			matchedTasks[taskId] = true
 		}
 	}
@@ -141,15 +141,41 @@ func updateWatchableDirectoryWithAncestors(watchable *WatchableDirectories, dirP
 }
 
 func globallyExcludedPathMatches(globallyExcluded util.GlobArray, pathStr string) bool {
-	if globallyExcluded.AnyMatches(pathStr) {
-		return true
-	}
+	return globArrayMatchesPath(globallyExcluded, pathStr)
+}
 
-	if pathStr != "." && !strings.HasPrefix(pathStr, "./") {
-		return globallyExcluded.AnyMatches("./" + pathStr)
+func globArrayMatchesPath(globs util.GlobArray, pathStr string) bool {
+	for _, candidate := range globMatchPathVariants(pathStr) {
+		if globs.AnyMatches(candidate) {
+			return true
+		}
 	}
 
 	return false
+}
+
+func globMatchPathVariants(pathStr string) []string {
+	pathStr = filepath.ToSlash(pathStr)
+	pathStr = strings.ReplaceAll(pathStr, "\\", "/")
+	cleaned := path.Clean(pathStr)
+
+	variants := make([]string, 0, 3)
+	addVariant := func(candidate string) {
+		for _, existing := range variants {
+			if existing == candidate {
+				return
+			}
+		}
+		variants = append(variants, candidate)
+	}
+
+	addVariant(pathStr)
+	addVariant(cleaned)
+	if cleaned != "." && !strings.HasPrefix(cleaned, "./") {
+		addVariant("./" + cleaned)
+	}
+
+	return variants
 }
 
 func seedExistingIncludeRoots(
@@ -164,7 +190,8 @@ func seedExistingIncludeRoots(
 			if globallyExcludedPathMatches(globallyExcluded, root) {
 				continue
 			}
-			if !existingDirectory(fs, root) {
+			root = nearestExistingDirectory(fs, root)
+			if root == "" || globallyExcludedPathMatches(globallyExcluded, root) {
 				continue
 			}
 
@@ -215,6 +242,49 @@ func existingDirectory(fs asynkutil.FileSystem, dirPath string) bool {
 	}
 
 	return false
+}
+
+func nearestExistingDirectory(fs asynkutil.FileSystem, dirPath string) string {
+	dirPath = normalizePathForLookup(dirPath)
+	for {
+		if existingDirectory(fs, dirPath) {
+			return dirPath
+		}
+		if dirPath == "." {
+			return ""
+		}
+
+		parentDirPath := path.Dir(dirPath)
+		if parentDirPath == dirPath {
+			return ""
+		}
+		dirPath = parentDirPath
+	}
+}
+
+func taskCanMatchDirectory(dirPath string, taskConfig *config.TaskConfig) bool {
+	if taskConfig == nil {
+		return false
+	}
+
+	for _, include := range taskConfig.Include {
+		root := includeRootFromPattern(include.String())
+		if directoryPathsOverlap(root, dirPath) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func directoryPathsOverlap(left string, right string) bool {
+	left = normalizePathForLookup(left)
+	right = normalizePathForLookup(right)
+
+	return left == "." ||
+		right == "." ||
+		pathIsWithinDirectory(left, right) ||
+		pathIsWithinDirectory(right, left)
 }
 
 func map2fields[T any](m map[string]T) []zap.Field {

@@ -278,7 +278,14 @@ func (w *Watcher) handleDirectoryCreate(dirPath string, discoveredAt time.Time) 
 		return
 	}
 
-	inheritedTasks := copyTaskIds(parentDirectory.TaskIds)
+	inheritedTasks := w.taskIdsForCreatedDirectory(dirPath, parentDirectory.TaskIds)
+	if len(inheritedTasks) == 0 {
+		w.log.Debug("Skipping directory outside task include roots",
+			zap.String("directory", dirPath),
+		)
+		return
+	}
+
 	if err := w.fs.Walk(dirPath, func(pathStr string, info os.FileInfo, err error) error {
 		if err != nil {
 			w.log.Error("Error walking created directory",
@@ -298,7 +305,12 @@ func (w *Watcher) handleDirectoryCreate(dirPath string, discoveredAt time.Time) 
 				return filepath.SkipDir
 			}
 
-			w.watchRuntimeDirectory(pathStr, inheritedTasks)
+			directoryTasks := w.taskIdsForCreatedDirectory(pathStr, inheritedTasks)
+			if len(directoryTasks) == 0 {
+				return filepath.SkipDir
+			}
+
+			w.watchRuntimeDirectory(pathStr, directoryTasks)
 			return nil
 		}
 
@@ -332,6 +344,21 @@ func (w *Watcher) watchRuntimeDirectory(dirPath string, taskIds map[string]bool)
 			zap.Error(err),
 		)
 	}
+}
+
+func (w *Watcher) taskIdsForCreatedDirectory(dirPath string, candidateTasks map[string]bool) map[string]bool {
+	if len(w.directories.taskConfigs) == 0 {
+		return copyTaskIds(candidateTasks)
+	}
+
+	tasks := make(map[string]bool)
+	for taskId := range candidateTasks {
+		if taskCanMatchDirectory(dirPath, w.directories.taskConfigs[taskId]) {
+			tasks[taskId] = true
+		}
+	}
+
+	return tasks
 }
 
 func (w *Watcher) isGloballyExcludedDirectory(dirPath string) bool {
@@ -426,7 +453,7 @@ func (w *Watcher) matchingTasksForFile(filePath string, directoryTasks map[strin
 		return copyTaskIds(directoryTasks)
 	}
 
-	return getMatchingTasks(normalizePathForLookup(filePath), w.directories.taskConfigs)
+	return getMatchingTasks(filePath, w.directories.taskConfigs)
 }
 
 func copyTaskIds(source map[string]bool) map[string]bool {
