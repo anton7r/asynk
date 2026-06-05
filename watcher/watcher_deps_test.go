@@ -1271,6 +1271,60 @@ func TestHandleFsEvent_DirectoryCreateSkipsGlobalExclude(t *testing.T) {
 	w.Close()
 }
 
+func TestHandleFsEvent_DirectoryCreateSkipsGlobalSubtreeExcludeRoot(t *testing.T) {
+	logger := zap.NewNop()
+	mfs := newMockFS()
+	mfs.addDir("src/generated")
+	mfs.addDir("src/generated/client")
+	mfs.addFile("src/generated/client/main.go", time.Now())
+
+	taskConfigs := TaskConfigMap{
+		"build": &config.TaskConfig{
+			Include: configutil.NewGlobArray("src/**/*.go"),
+			Exclude: configutil.NewGlobArray(),
+		},
+	}
+
+	dirs := &WatchableDirectories{
+		directories: map[string]WatchableDirectory{
+			"src": {
+				MatchedDirectory: "src",
+				RelativePath:     "./src",
+				TaskIds:          map[string]bool{"build": true},
+			},
+		},
+		taskConfigs:      taskConfigs,
+		globallyExcluded: configutil.NewGlobArray("src/generated/**"),
+	}
+
+	propagateCalled := false
+	fw := newTestFsWatcher()
+	w, err := NewWatcherWithDeps(
+		logger,
+		dirs,
+		func(events map[string]AggregatedEvent) { propagateCalled = true },
+		mfs,
+		fw,
+	)
+	assert.NoError(t, err)
+
+	w.handleFsEvent(fsnotify.Event{
+		Name: "src/generated",
+		Op:   fsnotify.Create,
+	})
+
+	fw.mu.Lock()
+	assert.NotContains(t, fw.addedDirs, "./src/generated")
+	assert.NotContains(t, fw.addedDirs, "./src/generated/client")
+	fw.mu.Unlock()
+
+	time.Sleep(300 * time.Millisecond)
+	assert.False(t, propagateCalled,
+		"globally excluded subtree root creation should not propagate a file event")
+
+	w.Close()
+}
+
 func TestHandleFsEvent_DirectoryCreateSkipsTaskExclude(t *testing.T) {
 	logger := zap.NewNop()
 	mfs := newMockFS()
