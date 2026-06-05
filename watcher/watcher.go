@@ -51,7 +51,7 @@ type AggregatedEvent struct {
 type FileEventAggregator struct {
 	aggregated     map[string]AggregatedEvent
 	aggregatorLock sync.Mutex
-	changeId       int8
+	changeId       int64
 }
 
 func NewWatcher(
@@ -403,8 +403,11 @@ func (w *Watcher) addAggregatedEvent(
 		}
 	}
 
-	event.Files[eventFilePath] = &UpdatedFile{
-		ModifiedTime: modifiedTime,
+	existingFile, exists := event.Files[eventFilePath]
+	if !exists || existingFile == nil || modifiedTime.After(existingFile.ModifiedTime) {
+		event.Files[eventFilePath] = &UpdatedFile{
+			ModifiedTime: modifiedTime,
+		}
 	}
 	for taskId := range tasks {
 		event.Tasks[taskId] = true
@@ -500,7 +503,7 @@ func (w *Watcher) fsDebounceForTasks(tasks map[string]bool) time.Duration {
 }
 
 // If the changeId matches the current changeId, we propagate the events.
-func (w *Watcher) propagateEvents(delay time.Duration, changeId int8) {
+func (w *Watcher) propagateEvents(delay time.Duration, changeId int64) {
 	time.Sleep(delay)
 	w.aggregator.aggregatorLock.Lock()
 	defer w.aggregator.aggregatorLock.Unlock()

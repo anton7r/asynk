@@ -962,6 +962,64 @@ func TestHandleFsEvent_DirectoryCreateUsesDiscoveryTimeForScannedFiles(t *testin
 	w.Close()
 }
 
+func TestHandleFsEvent_DirectoryCreateKeepsDiscoveryTimeAfterFileEvent(t *testing.T) {
+	logger := zap.NewNop()
+	mfs := newMockFS()
+	oldModTime := time.Date(2020, 1, 2, 3, 4, 5, 0, time.UTC)
+	mfs.addDir("src/newpkg")
+	mfs.addFile("src/newpkg/main.go", oldModTime)
+
+	taskConfigs := TaskConfigMap{
+		"build": &config.TaskConfig{
+			Include: configutil.NewGlobArray("**/*.go"),
+			Exclude: configutil.NewGlobArray(),
+		},
+	}
+	dirs := &WatchableDirectories{
+		directories: map[string]WatchableDirectory{
+			"src": {
+				MatchedDirectory: "src",
+				RelativePath:     "./src",
+				TaskIds:          map[string]bool{"build": true},
+			},
+		},
+		taskConfigs: taskConfigs,
+	}
+
+	eventsChan := make(chan map[string]AggregatedEvent, 1)
+	fw := newTestFsWatcher()
+	w, err := NewWatcherWithDepsAndOptions(
+		logger,
+		dirs,
+		func(events map[string]AggregatedEvent) { eventsChan <- events },
+		mfs,
+		fw,
+		WatcherOptions{DefaultFSDebounce: 50 * time.Millisecond, DefaultFSDebounceSet: true},
+	)
+	assert.NoError(t, err)
+
+	discoveryStarted := time.Now()
+	w.handleFsEvent(fsnotify.Event{
+		Name: "src/newpkg",
+		Op:   fsnotify.Create,
+	})
+	w.handleFsEvent(fsnotify.Event{
+		Name: "src/newpkg/main.go",
+		Op:   fsnotify.Create,
+	})
+
+	select {
+	case events := <-eventsChan:
+		scannedFile := events["src/newpkg"].Files["src/newpkg/main.go"]
+		assert.NotEqual(t, oldModTime, scannedFile.ModifiedTime)
+		assert.False(t, scannedFile.ModifiedTime.Before(discoveryStarted))
+	case <-time.After(2 * time.Second):
+		t.Fatal("Timed out waiting for debounced scanned directory file event")
+	}
+
+	w.Close()
+}
+
 func TestHandleFsEvent_DirectoryCreateScansCopiedTreeRecursively(t *testing.T) {
 	logger := zap.NewNop()
 	mfs := newMockFS()
@@ -1221,7 +1279,7 @@ func TestNewWatcherWithDeps_InitializesCorrectly(t *testing.T) {
 	assert.NotNil(t, w)
 	assert.NotNil(t, w.aggregator)
 	assert.Empty(t, w.aggregator.aggregated)
-	assert.Equal(t, int8(0), w.aggregator.changeId)
+	assert.Equal(t, int64(0), w.aggregator.changeId)
 	assert.False(t, called)
 
 	w.Close()
@@ -1352,6 +1410,49 @@ func TestWatcherFSDebounce_PendingSlowEventIsNotFlushedByFastEvent(t *testing.T)
 		assert.Contains(t, events, "assets")
 	case <-time.After(200 * time.Millisecond):
 		t.Fatal("timed out waiting for debounced events")
+	}
+}
+
+func TestWatcherFSDebounce_DoesNotWrapGenerationForLargeBatch(t *testing.T) {
+	logger := zap.NewNop()
+	mfs := newMockFS()
+	fw := newTestFsWatcher()
+	dirs := &WatchableDirectories{directories: make(map[string]WatchableDirectory)}
+
+	eventsChan := make(chan map[string]AggregatedEvent, 4)
+	w, err := NewWatcherWithDepsAndOptions(
+		logger,
+		dirs,
+		func(events map[string]AggregatedEvent) { eventsChan <- events },
+		mfs,
+		fw,
+		WatcherOptions{DefaultFSDebounce: 30 * time.Millisecond, DefaultFSDebounceSet: true},
+	)
+	assert.NoError(t, err)
+	defer w.Close()
+
+	now := time.Now()
+	for i := 0; i < 257; i++ {
+		w.addAggregatedEvent(
+			"src",
+			fmt.Sprintf("src/file%03d.go", i),
+			now,
+			map[string]bool{"build": true},
+		)
+	}
+
+	time.Sleep(120 * time.Millisecond)
+
+	var batches []map[string]AggregatedEvent
+	for {
+		select {
+		case events := <-eventsChan:
+			batches = append(batches, events)
+		default:
+			assert.Len(t, batches, 1)
+			assert.Len(t, batches[0]["src"].Files, 257)
+			return
+		}
 	}
 }
 
@@ -1631,6 +1732,27 @@ func TestMatchWatchableDirectoriesWithFS_WatchesAncestorsOfMatchedDirectories(t 
 	assert.True(t, result.directories["src"].TaskIds["build"])
 }
 
+func TestMatchWatchableDirectoriesWithFS_WatchesExistingIncludeRootWithoutMatches(t *testing.T) {
+	logger := zap.NewNop()
+	mfs := newMockFS()
+
+	mfs.addDir("./")
+	mfs.addDir("./src")
+
+	taskConfigs := TaskConfigMap{
+		"build": &config.TaskConfig{
+			Include: configutil.NewGlobArray("src/**/*.go"),
+			Exclude: configutil.NewGlobArray(),
+		},
+	}
+
+	result := MatchWatchableDirectoriesWithFS(logger, configutil.GlobArray{}, taskConfigs, mfs)
+
+	assert.NotNil(t, result)
+	assert.Contains(t, result.directories, "src")
+	assert.True(t, result.directories["src"].TaskIds["build"])
+}
+
 func TestMatchWatchableDirectoriesWithFS_ExcludesGlobalDirs(t *testing.T) {
 	logger := zap.NewNop()
 	mfs := newMockFS()
@@ -1707,7 +1829,7 @@ func TestMatchWatchableDirectoriesWithFS_EmptyFS(t *testing.T) {
 	assert.Empty(t, result.directories)
 }
 
-func TestMatchWatchableDirectoriesWithFS_NoMatchingTasks(t *testing.T) {
+func TestMatchWatchableDirectoriesWithFS_SeedsRootIncludeWithoutMatches(t *testing.T) {
 	logger := zap.NewNop()
 	mfs := newMockFS()
 
@@ -1724,11 +1846,8 @@ func TestMatchWatchableDirectoriesWithFS_NoMatchingTasks(t *testing.T) {
 	result := MatchWatchableDirectoriesWithFS(logger, configutil.GlobArray{}, taskConfigs, mfs)
 	assert.NotNil(t, result)
 
-	// readme.md doesn't match **/*.go so no directory should have the build task.
-	for _, dir := range result.directories {
-		assert.False(t, dir.TaskIds["build"],
-			"No directory should be matched for build task")
-	}
+	assert.Contains(t, result.directories, ".")
+	assert.True(t, result.directories["."].TaskIds["build"])
 }
 
 // =====================================================================
