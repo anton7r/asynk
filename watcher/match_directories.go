@@ -141,7 +141,7 @@ func updateWatchableDirectoryWithAncestors(watchable *WatchableDirectories, dirP
 }
 
 func globallyExcludedPathMatches(globallyExcluded util.GlobArray, pathStr string) bool {
-	return globArrayMatchesPath(globallyExcluded, pathStr)
+	return directoryExcludedByGlobArray(pathStr, globallyExcluded)
 }
 
 func globArrayMatchesPath(globs util.GlobArray, pathStr string) bool {
@@ -266,7 +266,7 @@ func taskCanMatchDirectory(dirPath string, taskConfig *config.TaskConfig) bool {
 	if taskConfig == nil {
 		return false
 	}
-	if taskExcludesDirectory(dirPath, taskConfig.Exclude) {
+	if directoryExcludedByGlobArray(dirPath, taskConfig.Exclude) {
 		return false
 	}
 
@@ -280,7 +280,7 @@ func taskCanMatchDirectory(dirPath string, taskConfig *config.TaskConfig) bool {
 	return false
 }
 
-func taskExcludesDirectory(dirPath string, excludes util.GlobArray) bool {
+func directoryExcludedByGlobArray(dirPath string, excludes util.GlobArray) bool {
 	if len(excludes) == 0 {
 		return false
 	}
