@@ -266,10 +266,46 @@ func taskCanMatchDirectory(dirPath string, taskConfig *config.TaskConfig) bool {
 	if taskConfig == nil {
 		return false
 	}
+	if taskExcludesDirectory(dirPath, taskConfig.Exclude) {
+		return false
+	}
 
 	for _, include := range taskConfig.Include {
 		root := includeRootFromPattern(include.String())
 		if directoryPathsOverlap(root, dirPath) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func taskExcludesDirectory(dirPath string, excludes util.GlobArray) bool {
+	if len(excludes) == 0 {
+		return false
+	}
+	if globArrayMatchesPath(excludes, dirPath) {
+		return true
+	}
+
+	probePath := path.Join(normalizePathForLookup(dirPath), ".asynk-directory-probe")
+	for _, exclude := range excludes {
+		if patternExcludesWholeSubtree(exclude.String()) && globMatchesPathVariants(exclude, probePath) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func patternExcludesWholeSubtree(pattern string) bool {
+	pattern = normalizePathForLookup(pattern)
+	return pattern == "**" || strings.HasSuffix(pattern, "/**") || strings.HasSuffix(pattern, "/**/*")
+}
+
+func globMatchesPathVariants(glob *util.Glob, pathStr string) bool {
+	for _, candidate := range globMatchPathVariants(pathStr) {
+		if glob.Match(candidate) {
 			return true
 		}
 	}
