@@ -1020,6 +1020,159 @@ func TestHandleFsEvent_DirectoryCreateKeepsDiscoveryTimeAfterFileEvent(t *testin
 	w.Close()
 }
 
+func TestHandleFsEvent_FileEventMatchesDotSlashInclude(t *testing.T) {
+	logger := zap.NewNop()
+	mfs := newMockFS()
+	modTime := time.Date(2026, 4, 2, 12, 30, 0, 0, time.UTC)
+	mfs.addFile("./src/pkg/main.go", modTime)
+
+	taskConfigs := TaskConfigMap{
+		"build": &config.TaskConfig{
+			Include: configutil.NewGlobArray("./src/**/*.go"),
+			Exclude: configutil.NewGlobArray(),
+		},
+	}
+	dirs := &WatchableDirectories{
+		directories: map[string]WatchableDirectory{
+			"src/pkg": {
+				MatchedDirectory: "src/pkg",
+				RelativePath:     "./src/pkg",
+				TaskIds:          map[string]bool{"build": true},
+			},
+		},
+		taskConfigs: taskConfigs,
+	}
+
+	eventsChan := make(chan map[string]AggregatedEvent, 1)
+	fw := newTestFsWatcher()
+	w, err := NewWatcherWithDepsAndOptions(
+		logger,
+		dirs,
+		func(events map[string]AggregatedEvent) { eventsChan <- events },
+		mfs,
+		fw,
+		WatcherOptions{DefaultFSDebounce: 0, DefaultFSDebounceSet: true},
+	)
+	assert.NoError(t, err)
+
+	w.handleFsEvent(fsnotify.Event{
+		Name: "./src/pkg/main.go",
+		Op:   fsnotify.Write,
+	})
+
+	select {
+	case events := <-eventsChan:
+		assert.Contains(t, events, "src/pkg")
+		assert.Contains(t, events["src/pkg"].Files, "./src/pkg/main.go")
+		assert.True(t, events["src/pkg"].Tasks["build"])
+	case <-time.After(2 * time.Second):
+		t.Fatal("Timed out waiting for dot-slash include file event")
+	}
+
+	w.Close()
+}
+
+func TestHandleFsEvent_FileEventHonorsDotSlashExclude(t *testing.T) {
+	logger := zap.NewNop()
+	mfs := newMockFS()
+	mfs.addFile("src/generated/main.go", time.Now())
+
+	taskConfigs := TaskConfigMap{
+		"build": &config.TaskConfig{
+			Include: configutil.NewGlobArray("src/**/*.go"),
+			Exclude: configutil.NewGlobArray("./src/generated/**"),
+		},
+	}
+	dirs := &WatchableDirectories{
+		directories: map[string]WatchableDirectory{
+			"src/generated": {
+				MatchedDirectory: "src/generated",
+				RelativePath:     "./src/generated",
+				TaskIds:          map[string]bool{"build": true},
+			},
+		},
+		taskConfigs: taskConfigs,
+	}
+
+	propagateCalled := false
+	fw := newTestFsWatcher()
+	w, err := NewWatcherWithDepsAndOptions(
+		logger,
+		dirs,
+		func(events map[string]AggregatedEvent) { propagateCalled = true },
+		mfs,
+		fw,
+		WatcherOptions{DefaultFSDebounce: 0, DefaultFSDebounceSet: true},
+	)
+	assert.NoError(t, err)
+
+	w.handleFsEvent(fsnotify.Event{
+		Name: "src/generated/main.go",
+		Op:   fsnotify.Write,
+	})
+
+	time.Sleep(300 * time.Millisecond)
+	assert.False(t, propagateCalled,
+		"dot-slash exclude should still apply to normalized file events")
+
+	w.Close()
+}
+
+func TestHandleFsEvent_DirectoryCreateSkipsUnrelatedIncludeRoot(t *testing.T) {
+	logger := zap.NewNop()
+	mfs := newMockFS()
+	mfs.addDir("vendor")
+	mfs.addDir("vendor/lib")
+	mfs.addFile("vendor/lib/main.go", time.Now())
+
+	taskConfigs := TaskConfigMap{
+		"build": &config.TaskConfig{
+			Include: configutil.NewGlobArray("src/**/*.go"),
+			Exclude: configutil.NewGlobArray(),
+		},
+	}
+	dirs := &WatchableDirectories{
+		directories: map[string]WatchableDirectory{
+			".": {
+				MatchedDirectory: ".",
+				RelativePath:     ".",
+				TaskIds:          map[string]bool{"build": true},
+			},
+		},
+		taskConfigs: taskConfigs,
+	}
+
+	propagateCalled := false
+	fw := newTestFsWatcher()
+	w, err := NewWatcherWithDepsAndOptions(
+		logger,
+		dirs,
+		func(events map[string]AggregatedEvent) { propagateCalled = true },
+		mfs,
+		fw,
+		WatcherOptions{DefaultFSDebounce: 0, DefaultFSDebounceSet: true},
+	)
+	assert.NoError(t, err)
+
+	w.handleFsEvent(fsnotify.Event{
+		Name: "vendor",
+		Op:   fsnotify.Create,
+	})
+
+	fw.mu.Lock()
+	assert.NotContains(t, fw.addedDirs, "./vendor")
+	assert.NotContains(t, fw.addedDirs, "./vendor/lib")
+	fw.mu.Unlock()
+	assert.NotContains(t, dirs.directories, "vendor")
+	assert.NotContains(t, dirs.directories, "vendor/lib")
+
+	time.Sleep(300 * time.Millisecond)
+	assert.False(t, propagateCalled,
+		"unrelated created trees should not be watched or propagated")
+
+	w.Close()
+}
+
 func TestHandleFsEvent_DirectoryCreateScansCopiedTreeRecursively(t *testing.T) {
 	logger := zap.NewNop()
 	mfs := newMockFS()
@@ -1751,6 +1904,26 @@ func TestMatchWatchableDirectoriesWithFS_WatchesExistingIncludeRootWithoutMatche
 	assert.NotNil(t, result)
 	assert.Contains(t, result.directories, "src")
 	assert.True(t, result.directories["src"].TaskIds["build"])
+}
+
+func TestMatchWatchableDirectoriesWithFS_WatchesNearestExistingParentForMissingIncludeRoot(t *testing.T) {
+	logger := zap.NewNop()
+	mfs := newMockFS()
+
+	mfs.addDir("./")
+
+	taskConfigs := TaskConfigMap{
+		"build": &config.TaskConfig{
+			Include: configutil.NewGlobArray("src/**/*.go"),
+			Exclude: configutil.NewGlobArray(),
+		},
+	}
+
+	result := MatchWatchableDirectoriesWithFS(logger, configutil.GlobArray{}, taskConfigs, mfs)
+
+	assert.NotNil(t, result)
+	assert.Contains(t, result.directories, ".")
+	assert.True(t, result.directories["."].TaskIds["build"])
 }
 
 func TestMatchWatchableDirectoriesWithFS_ExcludesGlobalDirs(t *testing.T) {
