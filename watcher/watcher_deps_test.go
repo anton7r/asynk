@@ -714,6 +714,84 @@ func TestHandleFsEvent_DirectoryCreateWatchesEmptyDirectory(t *testing.T) {
 	w.Close()
 }
 
+func TestHandleFsEvent_DirectoryWriteDoesNotScanDirectory(t *testing.T) {
+	logger := zap.NewNop()
+	mfs := newMockFS()
+	mfs.addDir("src/newpkg")
+	mfs.addFile("src/newpkg/main.go", time.Now())
+
+	dirs := &WatchableDirectories{
+		directories: map[string]WatchableDirectory{
+			"src": {
+				MatchedDirectory: "src",
+				RelativePath:     "./src",
+				TaskIds:          map[string]bool{"build": true},
+			},
+		},
+	}
+
+	propagateCalled := false
+	fw := newTestFsWatcher()
+	w, err := NewWatcherWithDeps(logger, dirs, func(events map[string]AggregatedEvent) { propagateCalled = true }, mfs, fw)
+	assert.NoError(t, err)
+
+	w.handleFsEvent(fsnotify.Event{
+		Name: "src/newpkg",
+		Op:   fsnotify.Write,
+	})
+
+	fw.mu.Lock()
+	assert.NotContains(t, fw.addedDirs, "./src/newpkg")
+	fw.mu.Unlock()
+
+	time.Sleep(300 * time.Millisecond)
+	assert.False(t, propagateCalled,
+		"directory write events should not rescan or propagate existing files")
+
+	w.Close()
+}
+
+func TestHandleFsEvent_DirectoryCreateRefreshesExistingWatch(t *testing.T) {
+	logger := zap.NewNop()
+	mfs := newMockFS()
+	mfs.addDir("src/newpkg")
+
+	dirs := &WatchableDirectories{
+		directories: map[string]WatchableDirectory{
+			"src": {
+				MatchedDirectory: "src",
+				RelativePath:     "./src",
+				TaskIds:          map[string]bool{"build": true},
+			},
+			"src/newpkg": {
+				MatchedDirectory: "src/newpkg",
+				RelativePath:     "./src/newpkg",
+				TaskIds:          map[string]bool{"build": true},
+			},
+		},
+	}
+
+	propagateCalled := false
+	fw := newTestFsWatcher()
+	w, err := NewWatcherWithDeps(logger, dirs, func(events map[string]AggregatedEvent) { propagateCalled = true }, mfs, fw)
+	assert.NoError(t, err)
+
+	w.handleFsEvent(fsnotify.Event{
+		Name: "src/newpkg",
+		Op:   fsnotify.Create,
+	})
+
+	fw.mu.Lock()
+	assert.Contains(t, fw.addedDirs, "./src/newpkg")
+	fw.mu.Unlock()
+
+	time.Sleep(300 * time.Millisecond)
+	assert.False(t, propagateCalled,
+		"recreated empty directory should refresh the watch without propagating a file event")
+
+	w.Close()
+}
+
 func TestHandleFsEvent_DirectoryCreateScansExistingMatchingFiles(t *testing.T) {
 	logger := zap.NewNop()
 	mfs := newMockFS()
