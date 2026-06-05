@@ -416,12 +416,13 @@ func (runner *Runner) getMatchedFileChangesForTask(
 			zap.String("file", file),
 		)
 
-		if taskConfig.Exclude.AnyMatches(file) {
+		normalizedFile := normalizePathSlashes(file)
+		if pathMatchesAny(taskConfig.Exclude, file, normalizedFile) {
 			runner.log.Debug("File excluded from task", zap.String("file", file))
 			continue
 		}
 
-		if taskConfig.Include.AnyMatches(file) {
+		if pathMatchesAny(taskConfig.Include, file, normalizedFile) {
 			runner.log.Debug("File matched task include pattern", zap.String("file", file))
 			matchedFiles = append(matchedFiles, file)
 

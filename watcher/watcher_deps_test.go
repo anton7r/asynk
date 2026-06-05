@@ -1173,6 +1173,64 @@ func TestHandleFsEvent_DirectoryCreateSkipsUnrelatedIncludeRoot(t *testing.T) {
 	w.Close()
 }
 
+func TestHandleFsEvent_DirectoryCreateMatchesBracketClassIncludeRoot(t *testing.T) {
+	logger := zap.NewNop()
+	mfs := newMockFS()
+	mfs.addDir("src/a")
+	mfs.addDir("src/a/pkg")
+	mfs.addFile("src/a/pkg/main.go", time.Now())
+
+	taskConfigs := TaskConfigMap{
+		"build": &config.TaskConfig{
+			Include: configutil.NewGlobArray("src/[ab]/**/*.go"),
+			Exclude: configutil.NewGlobArray(),
+		},
+	}
+	dirs := &WatchableDirectories{
+		directories: map[string]WatchableDirectory{
+			"src": {
+				MatchedDirectory: "src",
+				RelativePath:     "./src",
+				TaskIds:          map[string]bool{"build": true},
+			},
+		},
+		taskConfigs: taskConfigs,
+	}
+
+	eventsChan := make(chan map[string]AggregatedEvent, 1)
+	fw := newTestFsWatcher()
+	w, err := NewWatcherWithDepsAndOptions(
+		logger,
+		dirs,
+		func(events map[string]AggregatedEvent) { eventsChan <- events },
+		mfs,
+		fw,
+		WatcherOptions{DefaultFSDebounce: 0, DefaultFSDebounceSet: true},
+	)
+	assert.NoError(t, err)
+
+	w.handleFsEvent(fsnotify.Event{
+		Name: "src/a",
+		Op:   fsnotify.Create,
+	})
+
+	fw.mu.Lock()
+	assert.Contains(t, fw.addedDirs, "./src/a")
+	assert.Contains(t, fw.addedDirs, "./src/a/pkg")
+	fw.mu.Unlock()
+
+	select {
+	case events := <-eventsChan:
+		assert.Contains(t, events, "src/a/pkg")
+		assert.Contains(t, events["src/a/pkg"].Files, "src/a/pkg/main.go")
+		assert.True(t, events["src/a/pkg"].Tasks["build"])
+	case <-time.After(2 * time.Second):
+		t.Fatal("Timed out waiting for bracket-class include created directory event")
+	}
+
+	w.Close()
+}
+
 func TestHandleFsEvent_DirectoryCreateScansCopiedTreeRecursively(t *testing.T) {
 	logger := zap.NewNop()
 	mfs := newMockFS()
